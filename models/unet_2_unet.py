@@ -555,7 +555,7 @@ class UNetModel(nn.Module):
             timesteps = timesteps.repeat(x.shape[0])
         return timesteps
     
-    def forward(self, t_v, v, t, x, y=None):
+    def forward(self, t_v, v, t, x, y=None): #differente da unet_cat_xt_v che ha t_v, v, t, xt???, y=None
         """Apply the model to an input batch.
 
         :param x: an [N x C x ...] Tensor of inputs.
@@ -573,29 +573,29 @@ class UNetModel(nn.Module):
         emb_t_v = self.time_embed_t_v(timestep_embedding(timesteps_v, self.model_channels))
         timesteps = self.process_t(t, x)
         emb_t = self.time_embed_t(timestep_embedding(timesteps, self.model_channels))
-
-        if self.num_classes is not None:
-            assert y.shape == (v.shape[0],)
-            emb_t_v = emb_t_v + self.label_emb(y)
+        #non c'è concatenazione degli embedding qui_________________________
+        if self.num_classes is not None: #se class conditional
+            assert y.shape == (v.shape[0],) #batch size corrisponde
+            emb_t_v = emb_t_v + self.label_emb(y) #aggiunge embedding label a entrambi gli embedding temporali
             emb_t = emb_t + self.label_emb(y)
 
         hv = v.type(self.dtype)
         hx = x.type(self.dtype)
-        for module, module_x in zip(self.input_blocks, self.input_blocks_x):
-            hv = module((hv, hx), (emb_t_v, emb_t))
-            hx = module_x(hx, emb_t)
-            hvs.append(hv)
+        for module, module_x in zip(self.input_blocks, self.input_blocks_x): #blocchi input in parallelo separati
+            hv = module((hv, hx), (emb_t_v, emb_t)) #hv dipende da hx
+            hx = module_x(hx, emb_t) #hx dipende solo da emb_t evolve da solo
+            hvs.append(hv) #salva le feature map di ogni blocco di input
             hxs.append(hx)
-        hv = self.middle_block(hv, emb_t_v)
-        hx = self.middle_block_x(hx, emb_t)
+        hv = self.middle_block(hv, emb_t_v) # bottleneck applicato a hv
+        hx = self.middle_block_x(hx, emb_t) # stesso per hx
         for idx in range(len(self.output_blocks) - 1):
-            hv = th.cat([hv, hvs.pop()], dim=1)
-            hx = th.cat([hx, hxs.pop()], dim=1)
+            hv = th.cat([hv, hvs.pop()], dim=1) #concatena le feature map salvate, skip connection
+            hx = th.cat([hx, hxs.pop()], dim=1) #stesso per hx
             hv = self.output_blocks[idx]((hv, hx), (emb_t_v, emb_t))
             hx = self.output_blocks_x[idx](hx, emb_t)
-        hv = th.cat([hv, hvs.pop()], dim=1)
+        hv = th.cat([hv, hvs.pop()], dim=1) 
         hx = th.cat([hx, hxs.pop()], dim=1)
-        hv = self.output_blocks[-1]((hv, hx), (emb_t_v, emb_t))
+        hv = self.output_blocks[-1]((hv, hx), (emb_t_v, emb_t)) 
         hv = hv.type(v.dtype)
         return self.out(hv)
 

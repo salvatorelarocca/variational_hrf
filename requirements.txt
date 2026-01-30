@@ -11,5 +11,5 @@ scanpy
 torchdyn>=1.0.6   # 1.0.4 is broken on pypi
 pot<0.9.5
 torchdiffeq
-absl-py
+absl-py #gestione delle flags
 clean-fid

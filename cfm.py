@@ -1,5 +1,14 @@
 """Implements Conditional Flow Matcher Losses."""
-
+'''
+Classi implementano tecniche diverse per 
+costruire i dati di addestramento del Flow Matching
+Sono classi che calcolano il campo velocità target usato nella loss
+e x_t, partendo da x0(distribuzione nota) e x1(immagini reali). 
+Nel file train.py viene usata solo ConditionalFlowMatcher.
+Con precizione nel train.py viene usata il metodo della classe:
+t, x_t, target = FM.sample_location_and_conditional_flow(x0, x1)
+che utilizza la classica formula x_t = (1-t)x_0 + tx_1
+'''
 # Author: Alex Tong
 #         Kilian Fatras
 #         +++
@@ -7,27 +16,24 @@
 
 import math
 import warnings
-from typing import Union
+from typing import Union # per i tipi di variabili
 
 import numpy as np
-import ot as pot
+import ot as pot # Python Optimal Transport per il calcolo dei trasporti ottimali
 import torch
-from functools import partial
+from functools import partial # crea nuove funzioni con argomenti preimpostati, per semplificare il codice
 
 
 def pad_t_like_x(t, x):
     """Function to reshape the time vector t by the number of dimensions of x.
-
     Parameters
     ----------
     x : Tensor, shape (bs, *dim)
         represents the source minibatch
     t : FloatTensor, shape (bs)
-
     Returns
     -------
     t : Tensor, shape (bs, number of x dimensions)
-
     Example
     -------
     x: Tensor (bs, C, W, H)
@@ -36,7 +42,8 @@ def pad_t_like_x(t, x):
     """
     if isinstance(t, (float, int)):
         return t
-    return t.reshape(-1, *([1] * (x.dim() - 1)))
+    return t.reshape(-1, *([1] * (x.dim() - 1))) #Crea tante dimensioni di grandezza 1 quante ne servono 
+    #per far combaciare le dimensioni di t con quelle di x 
 
 
 class OTPlanSampler:
@@ -241,7 +248,9 @@ class OTPlanSampler:
         to_return = np.stack(to_return, axis=1)
         return to_return
 
+'''Unica classe usata in train.py
 
+'''
 class ConditionalFlowMatcher:
     """Base class for conditional flow matching methods. This class implements the independent
     conditional flow matching methods from [1] and serves as a parent class for all other flow

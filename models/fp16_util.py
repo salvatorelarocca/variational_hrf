@@ -1,5 +1,6 @@
-"""Helpers to train with 16-bit precision."""
-
+"""Helpers to train with 16-bit precision. Per risparmiare memoria GPU."""
+"""La UNet di OpenAI non è pensata per essere addestrata “nuda” con Adam standard in FP32
+per questo viene fornito questo modulo di utilità che implementa il mixed-precision training"""
 import numpy as np
 import torch as th
 import torch.nn as nn

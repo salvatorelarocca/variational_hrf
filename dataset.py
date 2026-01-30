@@ -3,16 +3,15 @@ from torchvision import datasets, transforms
 
 from utils import infiniteloop
 
-
-def get_datalooper(ds, batch_size, num_workers, train=True, imagenet_root=None):
+def get_datalooper(ds: str, batch_size, num_workers, train=True, imagenet_root=None):
     if ds == 'cifar10':
         dataset = datasets.CIFAR10(
-            root="./data",
-            train=train,
-            download=True,
-            transform=transforms.Compose(
+            root="./data", # root directory del dataset dove viene cercato o scaricato
+            train=train, # caricamento del train/true else false/test set
+            download=True, # scarica se non presente
+            transform=transforms.Compose( # trsformazioni da applicare
                 [
-                    transforms.RandomHorizontalFlip(),
+                    transforms.RandomHorizontalFlip(), # data augmentation
                     transforms.ToTensor(),
                     transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
                 ]
@@ -53,6 +52,6 @@ def get_datalooper(ds, batch_size, num_workers, train=True, imagenet_root=None):
         num_workers=num_workers,
         drop_last=True,
     )
-    datalooper = infiniteloop(dataloader)
+    datalooper = infiniteloop(dataloader) # crea un iteratore infinito sul dataloader
 
     return datalooper, data_shape

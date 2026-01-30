@@ -285,29 +285,29 @@ class UNetModel(nn.Module):
             self.num_classes is not None
         ), "must specify y if and only if the model is class-conditional"
 
-        hs = []
+        hs = [] #lista per salvare le feature map di ogni blocco di input
         timesteps_v = self.process_t(t_v, v)
         emb_t_v = self.time_embed_t_v(timestep_embedding(timesteps_v, self.model_channels))
         timesteps = self.process_t(t, xt)
         emb_t = self.time_embed_t(timestep_embedding(timesteps, self.model_channels))
-        emb = th.cat([emb_t_v, emb_t], dim=1)
+        emb = th.cat([emb_t_v, emb_t], dim=1) # concatenazione embedding tempo t_v e t(è per xt) 
 
         if self.num_classes is not None:
             assert y.shape == (v.shape[0],)
             emb = emb + self.label_emb(y)
 
-        h = th.cat([v.type(self.dtype), xt.type(self.dtype)], dim=1)
-        for module in self.input_blocks:
-            h = module(h, emb)
-            hs.append(h)
-        h = self.middle_block(h, emb)
-        for module in self.output_blocks:
-            h = th.cat([h, hs.pop()], dim=1)
-            h = module(h, emb)
-        h = h.type(v.dtype)
-        h = self.out(h)
-        v, xt = th.chunk(h, 2, dim=1)
-        return v
+        h = th.cat([v.type(self.dtype), xt.type(self.dtype)], dim=1) # x e v concatenati lungo il canale
+        for module in self.input_blocks: # passa tutti i blocchi di input DOWNSAMPLING
+            h = module(h, emb) #passa h=cat(v,xt) e emb, i canali aumentano e H,W diminuiscono
+            hs.append(h) # salva le feature map di ogni blocco di input
+        h = self.middle_block(h, emb) # bottleneck
+        for module in self.output_blocks: # passa tutti i blocchi di output UPSAMPLING
+            h = th.cat([h, hs.pop()], dim=1) # concatenazione skip connection
+            h = module(h, emb) # passa al blocco output
+        h = h.type(v.dtype) 
+        h = self.out(h) # convoluzione finale
+        v, xt = th.chunk(h, 2, dim=1) # divide in 2 lungo il canale per riottenere v e xt
+        return v # ritorna solo `v`, `xt` è di supporto per concatenazione iniziale_______________________________
 
 
 NUM_CLASSES = 1000
@@ -380,4 +380,4 @@ class UNetModelWrapper(UNetModel):
 
     def forward(self, t_v, v, t, xt, y=None, *args, **kwargs):
         return super().forward(t_v, v, t, xt, y=y)
-
+    

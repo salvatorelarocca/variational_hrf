@@ -2,7 +2,9 @@
 
 https://github.com/openai/baselines/blob/ea25b9e8b234e6ee1bca43083f8f3cf974143998/baselines/logger.py
 """
-
+"""Questo file è un sistema di logging generico, copiato quasi integralmente da OpenAI Baselines. 
+Non ha nulla di specifico su HRF o sulle UNet: serve a registrare metriche, 
+messaggi e statistiche di training in vari formati (stdout, file, CSV, JSON, TensorBoard)."""
 import datetime
 import json
 import os

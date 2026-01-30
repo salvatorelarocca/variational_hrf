@@ -1,14 +1,17 @@
 """From https://raw.githubusercontent.com/openai/guided-diffusion/main/guided_diffusion/unet.py."""
+"""Architettura UNet di base di OPENAI con attenzione e embedding del timestep.
+Questa rete è un UNet specializzata per i modelli di diffusione. Le unet classiche sono x  →  U-Net  →  mask
+Questa invece è x, t  →  U-Net  →  x', dove t è il timestep di diffusione."""
 
 import math
-from abc import abstractmethod
+from abc import abstractmethod # per le classi astratte e interfacce
 
 import numpy as np
 import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .fp16_util import convert_module_to_f16, convert_module_to_f32
+from .fp16_util import convert_module_to_f16, convert_module_to_f32 # moduli interni per la conversione in fp16/fp32
 from .nn import (
     avg_pool_nd,
     checkpoint,
@@ -19,9 +22,11 @@ from .nn import (
     zero_module,
     exists,
     default,
-)
+) # moduli interni per operazioni NN specifiche
 
-
+'''Questo è un esempio tipico di attention adattata alle feature maps 2D. 
+Non è UNet in sé, ma è un building block che viene inserito nei livelli della UNet quando si vuole dare alla rete la capacità di 
+“guardare globalmente” l'immagine invece che solo localmente.'''
 class AttentionPool2d(nn.Module):
     """Adapted from CLIP: https://github.com/openai/CLIP/blob/main/clip/model.py."""
 
@@ -35,11 +40,13 @@ class AttentionPool2d(nn.Module):
         super().__init__()
         self.positional_embedding = nn.Parameter(
             th.randn(embed_dim, spacial_dim**2 + 1) / embed_dim**0.5
-        )
-        self.qkv_proj = conv_nd(1, embed_dim, 3 * embed_dim, 1)
-        self.c_proj = conv_nd(1, embed_dim, output_dim or embed_dim, 1)
-        self.num_heads = embed_dim // num_heads_channels
-        self.attention = QKVAttention(self.num_heads)
+        ) #positional embedding [embedding * della lunghezza spaziale + 1 (per il token cls token che riassume la sequenza dei pixel globali dell'immagine)]
+        # embed_dim**0.5 è una normalizzazione per stabilizzare i valori iniziali, senza la quale i valori esplodono nei primi stadi di addestramento
+        self.qkv_proj = conv_nd(1, embed_dim, 3 * embed_dim, 1) # token=B,C,HW+1 -> qkv=B,3C,HW+1 
+        #questa convoluzione 1D lineare lungo la dimensione della sequenza crea Q,K e V concatenati che verranno separati nel metodo forward utilizzati per l'attenzione
+        self.num_heads = embed_dim // num_heads_channels # numero di teste di attenzione
+        self.attention = QKVAttention(self.num_heads) # modulo di attenzione che calcola l'attenzione sui token Q,K,V
+        self.c_proj = conv_nd(1, embed_dim, output_dim or embed_dim, 1) # proiezione finale dopo l'attenzione
 
     def forward(self, x):
         b, c, *_spatial = x.shape
@@ -52,6 +59,10 @@ class AttentionPool2d(nn.Module):
         return x[:, :, 0]
 
 
+'''Tutti i blocchi di tipo TimestepBlock ereditano da questa classe astratta che 
+definisce il metodo forward che prende in input sia la feature map `x` che l'embedding del timestep `emb`.
+Ogni blocco non lavora solo sull'immagine x, ma anche su un timestep embedding emb che codifica il tempo t 
+della generazione o integrazione. Questa è un'interfaccia comune per tutti i blocchi che dipendono dal tempo.'''
 class TimestepBlock(nn.Module):
     """Any module where forward() takes timestep embeddings as a second argument."""
 
@@ -60,6 +71,7 @@ class TimestepBlock(nn.Module):
         """Apply the module to `x` given `emb` timestep embeddings."""
 
 
+'''concetto esteso alle sequenze di moduli. Ogni modulo nella sequenza che è un TimestepBlock riceve anche l'embedding del timestep.'''
 class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
     """A sequential module that passes timestep embeddings to the children that support it as an
     extra input."""
@@ -67,12 +79,13 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
     def forward(self, x, emb):
         for layer in self:
             if isinstance(layer, TimestepBlock):
-                x = layer(x, emb)
+                x = layer(x, emb) # forward con emb
             else:
-                x = layer(x)
+                x = layer(x) # forward senza emb
         return x
 
 
+'''Upsampling utilizzato nelle unet per aumentare la risoluzione delle feature maps.'''
 class Upsample(nn.Module):
     """An upsampling layer with an optional convolution.
 
@@ -92,11 +105,11 @@ class Upsample(nn.Module):
             self.conv = conv_nd(dims, self.channels, self.out_channels, 3, padding=1)
 
     def forward(self, x):
-        assert x.shape[1] == self.channels
+        assert x.shape[1] == self.channels # canali di input corretti la dimensione uno è quella dei canali 0 quella del batch
         if self.dims == 3:
             x = F.interpolate(x, (x.shape[2], x.shape[3] * 2, x.shape[4] * 2), mode="nearest")
         else:
-            x = F.interpolate(x, scale_factor=2, mode="nearest")
+            x = F.interpolate(x, scale_factor=2, mode="nearest") # raddoppia altezza e larghezza
         if self.use_conv:
             x = self.conv(x)
         return x
@@ -119,16 +132,17 @@ class Downsample(nn.Module):
         self.dims = dims
         stride = 2 if dims != 3 else (1, 2, 2)
         if use_conv:
-            self.op = conv_nd(dims, self.channels, self.out_channels, 3, stride=stride, padding=1)
+            self.op = conv_nd(dims, self.channels, self.out_channels, 3, stride=stride, padding=1) #downsampling learned
         else:
             assert self.channels == self.out_channels
-            self.op = avg_pool_nd(dims, kernel_size=stride, stride=stride)
+            self.op = avg_pool_nd(dims, kernel_size=stride, stride=stride) #downsampling non learned
 
     def forward(self, x):
         assert x.shape[1] == self.channels
         return self.op(x)
 
-
+'''Residual block con supporto per l'embedding del timestep.
+Utilizzato come meccanisco di stabilizzazione della rete UNet.'''
 class ResBlock(TimestepBlock):
     """A residual block that can optionally change the number of channels.
 
@@ -367,7 +381,11 @@ class QKVAttention(nn.Module):
     def count_flops(model, _x, y):
         return count_flops_attn(model, _x, y)
 
-
+'''La classe principale che implementa la UNet con attenzione e embedding del timestep.'''
+''' Dimensione entrante per le immagini è Batch, Channel RGB, Height, Width
+Dimensione uscente è la stessa.
+Il tempo non viene concatenato come canale(time-as-channel) ma viene passato come embedding separato.'''
+'''MODELLO BASE'''
 class UNetModel(nn.Module):
     """The full UNet model with attention and timestep embedding.
 
@@ -635,7 +653,8 @@ class UNetModel(nn.Module):
         h = h.type(x.dtype)
         return self.out(h)
 
-
+'''Non utilizzata in questo progetto, è una UNetModel che esegue il super-resolution.
+Pressocché lo stesso modello cambia però l'input: un argomento extra `low_res` per condizionare l'immagine a bassa risoluzione.'''
 class SuperResModel(UNetModel):
     """A UNetModel that performs super-resolution.
 
@@ -858,7 +877,7 @@ class EncoderUNetModel(nn.Module):
 
 NUM_CLASSES = 1000
 
-
+'''Wrapper per UNetModel che calcola automaticamente i parametri in base alla dimensione di input.'''
 class UNetModelWrapper(UNetModel):
     def __init__(
         self,
@@ -884,7 +903,7 @@ class UNetModelWrapper(UNetModel):
         image_size = dim[-1]
         if channel_mult is None:
             if image_size == 512:
-                channel_mult = (0.5, 1, 1, 2, 2, 4, 4)
+                channel_mult = (0.5, 1, 1, 2, 2, 4, 4) # dimensione dei canali ad ogni livello in base alla risoluzione dell'immagine
             elif image_size == 256:
                 channel_mult = (1, 1, 2, 2, 4, 4)
             elif image_size == 128:
