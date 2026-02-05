@@ -16,6 +16,7 @@ flags.DEFINE_string("output_dir", "./", help="output_directory")
 flags.DEFINE_string("imagenet_root", "./", help="root directory for imagenet")
 flags.DEFINE_string("exp_name", "exp", help="experiment name")
 flags.DEFINE_enum("dataset", "cifar10", ["cifar10", "mnist", "imagenet32"], help="dataset name")
+flags.DEFINE_string("model", "for_cifar10mini", help="Choose the model...")
 flags.DEFINE_bool("hrf", False, help="train hrf or baseline")
 flags.DEFINE_integer("gpu", 0, help="GPU number")
 
@@ -43,10 +44,12 @@ def eval(argv):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-    use_cuda = torch.cuda.is_available()
-    device = torch.device(f"cuda:{FLAGS.gpu}" if use_cuda else "cpu")
+    if FLAGS.gpu is not None and FLAGS.gpu >= 0 and torch.cuda.is_available():
+        device = torch.device(f"cuda:{FLAGS.gpu}")
+    else:
+        device = torch.device("cpu")
     
-    savedir = os.path.join(FLAGS.output_dir, f"results_{FLAGS.dataset}", f"{FLAGS.exp_name}")
+    savedir = os.path.join(FLAGS.output_dir, f"results_{FLAGS.model}", f"{FLAGS.exp_name}")
     ckptdir = os.path.join(savedir, "ckpt")
     imgdir = os.path.join(savedir, "img_eval")
     os.makedirs(imgdir, exist_ok=True)
@@ -61,7 +64,7 @@ def eval(argv):
 
     with torch.no_grad():
         unet = get_model(
-            FLAGS.dataset,
+            FLAGS.model,
             data_shape,
             FLAGS.channel_mult,
             FLAGS.num_channel,
@@ -84,9 +87,11 @@ def eval(argv):
 
         sample_shape = (16, *data_shape)
         if FLAGS.hrf:
+            print('Sampling with HRF model...')
             generated_img, nfe = sample_hrf(unet, sample_shape, 2, 100, device, FLAGS.integration_method)
             file = f"hrf_{FLAGS.integration_method}_{nfe}.png"
         else:
+            print('Sampling with RF model...')
             generated_img, nfe = sample_rf(unet, sample_shape, 100, device, FLAGS.integration_method)
             file = f"rf_{FLAGS.integration_method}_{nfe}.png"
         save_image(generated_img.clip(-1, 1) / 2 + 0.5, os.path.join(imgdir, file), nrow=4)

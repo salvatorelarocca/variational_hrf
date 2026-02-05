@@ -573,7 +573,7 @@ class UNetModel(nn.Module):
         emb_t_v = self.time_embed_t_v(timestep_embedding(timesteps_v, self.model_channels))
         timesteps = self.process_t(t, x)
         emb_t = self.time_embed_t(timestep_embedding(timesteps, self.model_channels))
-        #non c'è concatenazione degli embedding qui_________________________
+        #non c'è concatenazione degli embedding qui
         if self.num_classes is not None: #se class conditional
             assert y.shape == (v.shape[0],) #batch size corrisponde
             emb_t_v = emb_t_v + self.label_emb(y) #aggiunge embedding label a entrambi gli embedding temporali
@@ -670,4 +670,5 @@ class UNetModelWrapper(UNetModel):
 
     def forward(self, t_v, v, t, xt, y=None, *args, **kwargs):
         return super().forward(t_v, v, t, xt, y=y)
+    
 

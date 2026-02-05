@@ -49,6 +49,20 @@ def get_model(dataset, data_shape, channel_mult, num_channel, device, hrf=True):
         ).to(
             device
         )
+    elif dataset == "for_cifar10mini":
+        channel_mult = [int(i) for i in channel_mult]
+        unet = UNetModelWrapper(
+            dim=data_shape,
+            num_res_blocks=2,
+            num_channels=num_channel,
+            channel_mult=channel_mult,
+            num_heads=4,
+            num_head_channels=16,
+            attention_resolutions="16",
+            dropout=0.1,
+        ).to(
+            device
+        )
     elif dataset == "imagenet32":
         channel_mult = [int(i) for i in channel_mult]
         unet = UNetModelWrapper(
