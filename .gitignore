@@ -110,6 +110,9 @@ env.bak/
 venv.bak/
 env*/
 
+# Ouput results
+*output/
+
 # Spyder project settings
 .spyderproject
 .spyproject

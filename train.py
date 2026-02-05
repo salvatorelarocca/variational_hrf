@@ -5,10 +5,11 @@ import torch
 from absl import app, flags # per la gestione delle flags da linea di comando pacchetto absl-py
 from torch.utils import tensorboard # per la scrittura su tensorboard
 from tqdm import trange
-
+from hooks import unet_shape_hook
 
 from dataset import get_datalooper
 from model import get_model
+
 from utils import ema, generate_samples, load_model
 from cfm import (
     ConditionalFlowMatcher,
@@ -27,7 +28,7 @@ flags.DEFINE_bool("hrf", False, help="train hrf or baseline") # False per baseli
 flags.DEFINE_integer("gpu", 0, help="GPU number")
 
 # UNet
-flags.DEFINE_integer("num_channel", 128, help="base channel of UNet")
+flags.DEFINE_integer("num_channel", 128, help="base channel of UNet, 3 channels RGB became 128 channels in the first layer of UNet")
 flags.DEFINE_list("channel_mult", [1, 2, 2, 2], help="channel_mult of UNet")
 
 # Training

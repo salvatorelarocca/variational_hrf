@@ -53,12 +53,12 @@ def get_model(dataset, data_shape, channel_mult, num_channel, device, hrf=True):
         channel_mult = [int(i) for i in channel_mult]
         unet = UNetModelWrapper(
             dim=data_shape,
-            num_res_blocks=2,
+            num_res_blocks=2, #qualsiasi numero non rompe la coerenza dell'archi, è un iperparametro da ottimizzare e scegliere
             num_channels=num_channel,
             channel_mult=channel_mult,
-            num_heads=4,
-            num_head_channels=16,
-            attention_resolutions="16",
+            num_heads=4, #num_channels / num_heads deve essere divisibile per num_head_channels per restare coerente con l'architettura
+            num_head_channels=8,
+            attention_resolutions="16", # durante il downsample quando arriva a 16x16 applica l'attenzione
             dropout=0.1,
         ).to(
             device
