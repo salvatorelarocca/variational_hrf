@@ -34,7 +34,7 @@ for name, module in unet.named_modules():
 
 # Batch di input fittizio
 x = torch.randn(batch_size, in_channels, image_size, image_size, device=device)
-t = torch.randint(0, 1000, (batch_size,), device=device)  # timesteps fittizi
+t = torch.randint(0, 100, (batch_size,), device=device)  # timesteps fittizi
 v = torch.randn_like(x)  # se usi HRF
 
 # Esegui un forward di prova

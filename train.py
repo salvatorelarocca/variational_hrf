@@ -5,7 +5,8 @@ import torch
 from absl import app, flags # per la gestione delle flags da linea di comando pacchetto absl-py
 from torch.utils import tensorboard # per la scrittura su tensorboard
 from tqdm import trange
-from hooks import unet_shape_hook
+from vae.vae_model import BetaVAE
+
 
 from dataset import get_datalooper
 from model import get_model
@@ -80,6 +81,12 @@ flags.DEFINE_integer(
 def warmup_lr(step):
     return min(step, FLAGS.warmup) / FLAGS.warmup
 
+def _kl_divergence(mu, log_var):
+    # log_var = log(sigma^2)
+    return 0.5 * torch.sum(
+        mu.pow(2) + log_var.exp() - log_var - 1, # Sum(mu^2 + sigma^2 - log(sigma^2) - 1) per ogni dimensione latente
+        dim=1
+    )
 
 def train(argv):
     print(
@@ -132,6 +139,8 @@ def train(argv):
         device,
         hrf=FLAGS.hrf,
     ) # crea il modello UNet
+
+    vae = BetaVAE(in_channels=3, latent_dim=128).to(device) # modello VAE per HRF
     
     '''Calcolo del numero di parametri del modello per definire la complessità del modello'''
     model_size = 0
@@ -141,7 +150,7 @@ def train(argv):
     print("Model params: %.2f M" % (model_size / 1000 / 1000))
 
     ema_model = copy.deepcopy(unet) # copia del modello per ema
-    optim = torch.optim.Adam(unet.parameters(), lr=FLAGS.lr) # ottimizzatore Adam
+    optim = torch.optim.Adam(list(unet.parameters()) + list(vae.parameters()), lr=FLAGS.lr) # ottimizzatore Adam
     sched = torch.optim.lr_scheduler.LambdaLR(optim, lr_lambda=warmup_lr) # permette di variare il learning rate durante l'addestramento
 
     # continue training
@@ -159,6 +168,7 @@ def train(argv):
         ckpt = torch.load(os.path.join(ckptdir, ckpt), weights_only=True) # carica i pesi
         load_model(unet, ckpt['model']) # del modello unet
         load_model(ema_model, ckpt['ema_model']) # del modello ema
+        load_model(vae, ckpt['vae']) # del modello vae
         optim.load_state_dict(ckpt['optim']) # stato dell'ottimizzatore
         sched.load_state_dict(ckpt['sched']) # stato del scheduler
         cur_step = ckpt['step'] # ripristina lo step corrente
@@ -169,21 +179,27 @@ def train(argv):
     with trange(cur_step, cur_step + FLAGS.total_steps, dynamic_ncols=True) as pbar:
         for step in pbar:
             optim.zero_grad()
-            x1 = next(datalooper).to(device)
+            x1 = next(datalooper).to(device) 
             x0 = torch.randn_like(x1)
             t, xt, target = FM.sample_location_and_conditional_flow(x0, x1)
             if FLAGS.hrf:
                 v0 = torch.randn_like(target)
                 tau, vtau, target = FM.sample_location_and_conditional_flow(v0, target)
-                pred = unet(tau, vtau, t, xt)
+                # z = vae.get_latent_z()
+                # print(f'tau.shape: {tau.shape}, vtau.shape: {vtau.shape}, v0.shape: {v0.shape}, target.shape: {target.shape}')
+                z, mu, log_var = vae(v0, target, vtau, tau) #ottengo il latente z da passare al modello unet
+                #------------------------
+                pred = unet(tau, vtau, t, xt, z) #a_theta for hrf dove aggiungere il latente z
             else:
-                pred = unet(t, xt)
-            loss = torch.mean((pred - target) ** 2)
+                pred = unet(t, xt) #v_t for RF
+            recon_loss = torch.mean((pred - target) ** 2)
+            kl_loss = _kl_divergence(mu, log_var).mean() # media del KL divergence su tutto il batch
+            loss = recon_loss + kl_loss * 1 # valutare il peso del KL loss beta = 1 
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(unet.parameters(), FLAGS.grad_clip)  # new
+            torch.nn.utils.clip_grad_norm_(unet.parameters(), FLAGS.grad_clip)  
             optim.step()
             sched.step()
-            ema(unet, ema_model, FLAGS.ema_decay)  # new
+            ema(unet, ema_model, FLAGS.ema_decay)  
             pbar.set_description(f'loss: {loss.item():.4f}')
             pbar.update(1)
             
@@ -195,6 +211,7 @@ def train(argv):
                     {
                         "model": unet.state_dict(),
                         "ema_model": ema_model.state_dict(),
+                        "vae": vae.state_dict(),
                         "sched": sched.state_dict(),
                         "optim": optim.state_dict(),
                         "step": step,

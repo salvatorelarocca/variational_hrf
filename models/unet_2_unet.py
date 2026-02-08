@@ -1,7 +1,9 @@
 """From https://raw.githubusercontent.com/openai/guided-diffusion/main/guided_diffusion/unet.py."""
 
 # 2 UNet 
-# v net 4 times larger than x net
+# v net 4 volte più grande della unet x (riga 415 circa)
+# Un solo modello che contiene due rami uno per v e uno per x 
+# i blocchi con _x sono del ramo x, viceversa per v
 
 import math
 from abc import abstractmethod
@@ -93,6 +95,8 @@ class ResBlock_v(TimestepBlock):
             conv_nd(dims, int(channels // 4), 2 * self.out_channels if use_scale_shift_norm else self.out_channels, 3, padding=1),
         )
 
+
+
         self.updown = up or down
 
         if up:
@@ -118,6 +122,7 @@ class ResBlock_v(TimestepBlock):
                 2 * self.out_channels if use_scale_shift_norm else self.out_channels,
             ),
         )
+
 
         self.out_layers = nn.Sequential(
             normalization(self.out_channels),
@@ -236,6 +241,7 @@ class UNetModel(nn.Module):
         self.in_channels = in_channels
         self.model_channels = model_channels
         self.out_channels = out_channels
+        self.latent_dim = 128
         self.num_res_blocks = num_res_blocks
         self.attention_resolutions = attention_resolutions
         self.dropout = dropout
@@ -259,18 +265,23 @@ class UNetModel(nn.Module):
             nn.SiLU(),
             linear(time_embed_dim, time_embed_dim),
         )
+        self.emb_layers_z = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(self.latent_dim, time_embed_dim)
+        )
         
         if self.num_classes is not None:
             self.label_emb = nn.Embedding(num_classes, time_embed_dim)
 
-        # UNet for v
-        ch = input_ch = int(channel_mult[0] * model_channels)
+        # UNet for v______________________________________________________________________________________________________________________
+        # Blocchi iniziali = conv + resblock + attention block(eventuali) + downsample (tranne per l'ultimo livello)
+        ch = input_ch = int(channel_mult[0] * model_channels) # dimensione iniziale del canale = primo elemento di channel_mult * model_channels
         self.input_blocks = nn.ModuleList(
             [TimestepEmbedSequential(conv_nd(dims, in_channels, ch, 3, padding=1))]
         )
-        self._feature_size = ch
-        input_block_chans = [ch]
-        ds = 1
+        self._feature_size = ch # per tenere traccia della dim totale delle feature map, non viene usato
+        input_block_chans = [ch] # per tenere traccia delle dimensioni dei canali di ogni blocco di input, usata per le skip connection, inizializzata alla prima dimensione del canale
+        ds = 1 # indica il fattore di downsampling corrente 1 massima risoluzione (nessun downsampling ancora applicato)
         for level, mult in enumerate(channel_mult):
             for _ in range(num_res_blocks):
                 layers = [
@@ -284,8 +295,8 @@ class UNetModel(nn.Module):
                         use_scale_shift_norm=use_scale_shift_norm,
                     )
                 ]
-                ch = int(mult * model_channels)
-                if ds in attention_resolutions:
+                ch = int(mult * model_channels) # aggiorna la dimensione del canale dopo il blocco ResBlock_v
+                if ds in attention_resolutions: # se il fattore di downsampling corrente è nella tupla di risoluzioni aggiungi un blocco di attenzione
                     layers.append(
                         AttentionBlock(
                             ch,
@@ -296,9 +307,9 @@ class UNetModel(nn.Module):
                         )
                     )
                 self.input_blocks.append(TimestepEmbedSequential(*layers))
-                self._feature_size += ch
+                self._feature_size += ch # aggiorna la dim totale delle feature map dopo aver aggiunto il blocco
                 input_block_chans.append(ch)
-            if level != len(channel_mult) - 1:
+            if level != len(channel_mult) - 1: # se non siamo all'ultimo livello aggiungi blocco downsampling
                 out_ch = ch
                 self.input_blocks.append(
                     TimestepEmbedSequential(
@@ -318,9 +329,10 @@ class UNetModel(nn.Module):
                 )
                 ch = out_ch
                 input_block_chans.append(ch)
-                ds *= 2
+                ds *= 2 # aggiorna risoluzione
                 self._feature_size += ch
-
+        #fine costruzione blocchi input____________________________________________________________________________________________________
+        #inizio middle block, bottleneck___________________________________________________________________________________________________
         self.middle_block = TimestepEmbedSequential(
             ResBlock(
                 ch,
@@ -347,14 +359,15 @@ class UNetModel(nn.Module):
             ),
         )
         self._feature_size += ch
-
+    #fine middle block___________________________________________________________________________________________________________
+    #inizio blocchi output upsampling____________________________________________________________________________________________
         self.output_blocks = nn.ModuleList([])
-        for level, mult in list(enumerate(channel_mult))[::-1]:
-            for i in range(num_res_blocks + 1):
+        for level, mult in list(enumerate(channel_mult))[::-1]: #ciclo inverso sui livelli per upsampling
+            for i in range(num_res_blocks + 1): # per ogni livello aggiungiamo num_res_blocks + 1
                 ich = input_block_chans.pop()
                 layers = [
                     ResBlock_v(
-                        ch + ich,
+                        ch + ich, # dimensionte per le skip connection
                         time_embed_dim,
                         dropout,
                         out_channels=int(model_channels * mult),
@@ -374,7 +387,7 @@ class UNetModel(nn.Module):
                             use_new_attention_order=use_new_attention_order,
                         )
                     )
-                if level and i == num_res_blocks:
+                if level and i == num_res_blocks: #L’ultimo blocco di ogni livello (eccetto l’ultimo livello più basso) fa upsampling per risalire verso la risoluzione originale.
                     out_ch = ch
                     layers.append(
                         ResBlock_v(
@@ -385,7 +398,7 @@ class UNetModel(nn.Module):
                             dims=dims,
                             use_checkpoint=use_checkpoint,
                             use_scale_shift_norm=use_scale_shift_norm,
-                            up=True,
+                            up=True, #res in modalità upsampling
                         )
                         if resblock_updown
                         else Upsample(ch, conv_resample, dims=dims, out_channels=out_ch)
@@ -400,7 +413,7 @@ class UNetModel(nn.Module):
             zero_module(conv_nd(dims, input_ch, out_channels, 3, padding=1)),
         )
         
-        # UNet for x
+        # UNet for x_____________________________________________________________________________________________________________________
         model_channels = model_channels // 4
         ch = input_ch = int(channel_mult[0] * model_channels)
         self.input_blocks_x = nn.ModuleList(
@@ -555,7 +568,7 @@ class UNetModel(nn.Module):
             timesteps = timesteps.repeat(x.shape[0])
         return timesteps
     
-    def forward(self, t_v, v, t, x, y=None): #differente da unet_cat_xt_v che ha t_v, v, t, xt???, y=None
+    def forward(self, t_v, v, t, x, z=None ,y=None): 
         """Apply the model to an input batch.
 
         :param x: an [N x C x ...] Tensor of inputs.
@@ -567,25 +580,29 @@ class UNetModel(nn.Module):
             self.num_classes is not None
         ), "must specify y if and only if the model is class-conditional"
 
-        hxs = []
-        hvs = []
-        timesteps_v = self.process_t(t_v, v)
-        emb_t_v = self.time_embed_t_v(timestep_embedding(timesteps_v, self.model_channels))
-        timesteps = self.process_t(t, x)
-        emb_t = self.time_embed_t(timestep_embedding(timesteps, self.model_channels))
+        hxs = [] # salva le feature map di ogni blocco di input per x, per le skip connection
+        hvs = [] # stesso per v
+        timesteps_v = self.process_t(t_v, v) #processa i timesteps di v, se sono scalari li espande al batch size, se sono già batch li lascia così
+        emb_t_v = self.time_embed_t_v(timestep_embedding(timesteps_v, self.model_channels)) #emb di t_v
+        timesteps = self.process_t(t, x) #stesso per t
+        emb_t = self.time_embed_t(timestep_embedding(timesteps, self.model_channels)) #emb di t
+        if z is not None:
+            emb_z = self.emb_layers_z(z) #emb di z
+            emb_t_v = emb_t_v + emb_z #aggiunge embedding z a entrambi gli embedding temporali
+            emb_t = emb_t + emb_z #stesso per t
         #non c'è concatenazione degli embedding qui
         if self.num_classes is not None: #se class conditional
             assert y.shape == (v.shape[0],) #batch size corrisponde
             emb_t_v = emb_t_v + self.label_emb(y) #aggiunge embedding label a entrambi gli embedding temporali
-            emb_t = emb_t + self.label_emb(y)
+            emb_t = emb_t + self.label_emb(y) #stesso per t
 
         hv = v.type(self.dtype)
         hx = x.type(self.dtype)
-        for module, module_x in zip(self.input_blocks, self.input_blocks_x): #blocchi input in parallelo separati
+        for module, module_x in zip(self.input_blocks, self.input_blocks_x): #iterazione su le due liste di blocchi di input, uno per v e uno per x
             hv = module((hv, hx), (emb_t_v, emb_t)) #hv dipende da hx
             hx = module_x(hx, emb_t) #hx dipende solo da emb_t evolve da solo
             hvs.append(hv) #salva le feature map di ogni blocco di input
-            hxs.append(hx)
+            hxs.append(hx) #stesso per hx
         hv = self.middle_block(hv, emb_t_v) # bottleneck applicato a hv
         hx = self.middle_block_x(hx, emb_t) # stesso per hx
         for idx in range(len(self.output_blocks) - 1):
@@ -668,7 +685,7 @@ class UNetModelWrapper(UNetModel):
             use_new_attention_order=use_new_attention_order,
         )
 
-    def forward(self, t_v, v, t, xt, y=None, *args, **kwargs):
-        return super().forward(t_v, v, t, xt, y=y)
+    def forward(self, t_v, v, t, xt, z=None, y=None, *args, **kwargs):
+        return super().forward(t_v, v, t, xt, z=z, y=y)
     
 
