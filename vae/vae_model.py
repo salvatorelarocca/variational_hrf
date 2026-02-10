@@ -17,7 +17,7 @@ class BetaVAE(nn.Module):
     (indipendente da H e W) e poi concatenare tutto in un vettore da passare a fc_mu e fc_var.
     """
 
-    def __init__(self, in_channels: int, latent_dim: int, hidden_dims: List[int] = None):
+    def __init__(self, in_channels: int=3, latent_dim: int=128, hidden_dims: List[int] = None):
         super().__init__()
 
         self.latent_dim = latent_dim
@@ -50,14 +50,17 @@ class BetaVAE(nn.Module):
     def encode(self, v0: Tensor, v1: Tensor, vtau: Tensor, tau: Tensor):
         # passa ogni matrice nella CNN encoder
         h_v0 = torch.flatten(self.encoder(v0), 1)
+        print(f'h_v0.shape: {h_v0.shape}')
         h_v1 = torch.flatten(self.encoder(v1), 1)
+        print(f'h_v1.shape: {h_v1.shape}')
         h_vtau = torch.flatten(self.encoder(vtau), 1)
+        print(f'h_vtau.shape: {h_vtau.shape}')
 
-        tau = tau.view(1, 1)
-        tau = tau.expand(h_v0.size(0), -1)  # espande tau per concatenarlo agli hidden
+        tau = tau.unsqueeze(1)
 
         # concatena tutti gli hidden + tempi 
         h = torch.cat([h_v0, h_v1, h_vtau, tau], dim=1)
+        print(f'h.shape: {h.shape}')
 
         mu = self.fc_mu(h)
         log_var = self.fc_var(h)

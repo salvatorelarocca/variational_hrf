@@ -9,6 +9,7 @@ from torchvision.utils import save_image
 from dataset import get_datalooper
 from model import get_model
 from utils import sample_rf, sample_hrf, load_model
+from vae.vae_model import BetaVAE
 
 FLAGS = flags.FLAGS
 
@@ -19,6 +20,7 @@ flags.DEFINE_enum("dataset", "cifar10", ["cifar10", "mnist", "imagenet32"], help
 flags.DEFINE_string("model", "for_cifar10mini", help="Choose the model...")
 flags.DEFINE_bool("hrf", False, help="train hrf or baseline")
 flags.DEFINE_integer("gpu", 0, help="GPU number")
+flags.DEFINE_bool("variational", False, help="use variational autoencoder for HRF")
 
 # UNet
 flags.DEFINE_integer("num_channel", 128, help="base channel of UNet")
@@ -73,22 +75,36 @@ def eval(argv):
         )
         
         model_size = 0
+        print("Loading UNet model...")
         for param in unet.parameters():
             model_size += param.data.nelement()
         print(f"Model params number: {model_size}")
         print("Model params: %.2f M" % (model_size / 1000 / 1000))
 
-        # Load the model
+        # Load Unet the model
         ckpt = sorted(os.listdir(ckptdir), key=lambda x: int(x.split('_')[-1].split('.')[0]))[-1]
         print(f"loading {ckpt}")
         ckpt = torch.load(os.path.join(ckptdir, ckpt), weights_only=True)
         load_model(unet, ckpt['ema_model'])
         unet.eval()
 
+        # Load VAe model
+        if FLAGS.variational:
+            with torch.no_grad():
+                vae = BetaVAE(latent_dim=FLAGS.latent_dim).to(device)
+                load_model(vae, ckpt['vae'])
+                vae.eval()
+                vae_size = 0
+            for param in vae.parameters():
+                vae_size += param.data.nelement()
+            print("Loading VAE model...")
+            print(f"VAE params number: {vae_size}")
+            print("VAE params: %.2f M" % (vae_size / 1000 / 1000))
+
         sample_shape = (16, *data_shape)
         if FLAGS.hrf:
             print('Sampling with HRF model...')
-            generated_img, nfe = sample_hrf(unet, sample_shape, 2, 100, device, FLAGS.integration_method)
+            generated_img, nfe = sample_hrf(unet, vae, sample_shape, 2, 100, device, FLAGS.integration_method)
             file = f"hrf_{FLAGS.integration_method}_{nfe}.png"
         else:
             print('Sampling with RF model...')

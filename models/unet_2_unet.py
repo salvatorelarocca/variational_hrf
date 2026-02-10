@@ -266,6 +266,7 @@ class UNetModel(nn.Module):
             linear(time_embed_dim, time_embed_dim),
         )
         self.emb_layers_z = nn.Sequential(
+            linear(self.latent_dim, time_embed_dim),
             nn.SiLU(),
             nn.Linear(self.latent_dim, time_embed_dim)
         )

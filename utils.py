@@ -82,9 +82,9 @@ def sample_rf_dopri5(model, sample_shape, device):
     return xt, step_counter['steps'] #return x_1, nfe
 
 
-def sample_hrf(model, sample_shape, N, M, device, integration_method="euler"):
+def sample_hrf(model, sample_shape, N, M, device, integration_method="euler", vae=None):
         if integration_method == "euler":
-            xt = sample_hrf_euler(model, sample_shape, N, M, device)
+            xt = sample_hrf_euler(model, vae, sample_shape, N, M, device)
             nfe = N * M
         elif integration_method == "dopri5":
             xt, nfe = sample_hrf_dopri5(model, sample_shape, N, device)
@@ -97,7 +97,7 @@ Parametri:
 idem sopra
 Funzionalità: restituisce i campioni generati utilizzando il metodo di Eulero con il modello HRF
 '''
-def sample_hrf_euler(model, sample_shape, N, M, device):
+def sample_hrf_euler(model, vae, sample_shape, N, M, device):
     with torch.no_grad():
         batchsize = sample_shape[0] # utilizzato in expand di seguito
         xt = torch.randn(sample_shape, device=device) # x_0
@@ -110,6 +110,7 @@ def sample_hrf_euler(model, sample_shape, N, M, device):
             vtau = torch.randn(sample_shape, device=device) # v_0
             for j in range(M): # for interno tempo tau
                 tau = tau_values[j].expand(batchsize) 
+                # z, _, _ = vae(vtau, _, tau, t) # come target che metto???
                 a = model(tau, vtau, t, xt) # calcolo interazione interna
                 vtau += a / M # a * (1/M passo di integrazione)
             xt += vtau / N # a * (1/N passo di integrazione)

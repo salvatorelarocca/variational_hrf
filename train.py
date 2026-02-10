@@ -28,6 +28,11 @@ flags.DEFINE_string("model", "for_cifar10mini", help="Choose the model...")
 flags.DEFINE_bool("hrf", False, help="train hrf or baseline") # False per baseline, True per hrf
 flags.DEFINE_integer("gpu", 0, help="GPU number")
 
+# Variational HRF
+flags.DEFINE_bool("variational", False, help="train variational hrf or deterministic hrf")
+flags.DEFINE_integer("latent_dim", 128, help="dimension of the latent space for the VAE in variational HRF")
+flags.DEFINE_float("beta", 1.0, help="weight of the KL divergence loss in the VAE objective for variational HRF")
+
 # UNet
 flags.DEFINE_integer("num_channel", 128, help="base channel of UNet, 3 channels RGB became 128 channels in the first layer of UNet")
 flags.DEFINE_list("channel_mult", [1, 2, 2, 2], help="channel_mult of UNet")
@@ -76,7 +81,6 @@ flags.DEFINE_integer(
     50,
     help="frequency of saving loss to tensorboard",
 )
-
 
 def warmup_lr(step):
     return min(step, FLAGS.warmup) / FLAGS.warmup
@@ -140,7 +144,8 @@ def train(argv):
         hrf=FLAGS.hrf,
     ) # crea il modello UNet
 
-    vae = BetaVAE(in_channels=3, latent_dim=128).to(device) # modello VAE per HRF
+    if FLAGS.variational:
+        vae = BetaVAE(latent_dim=FLAGS.latent_dim).to(device) # modello VAE per HRF
     
     '''Calcolo del numero di parametri del modello per definire la complessità del modello'''
     model_size = 0
@@ -150,7 +155,15 @@ def train(argv):
     print("Model params: %.2f M" % (model_size / 1000 / 1000))
 
     ema_model = copy.deepcopy(unet) # copia del modello per ema
-    optim = torch.optim.Adam(list(unet.parameters()) + list(vae.parameters()), lr=FLAGS.lr) # ottimizzatore Adam
+    if FLAGS.variational:
+        vae_size = 0
+        for param in vae.parameters():
+            vae_size += param.data.nelement()
+        print(f"VAE params number: {vae_size}")
+        print("VAE params: %.2f M" % (vae_size / 1000 / 1000))
+        optim = torch.optim.Adam(list(unet.parameters()) + list(vae.parameters()), lr=FLAGS.lr) # ottimizzatore unet + vae
+    else:
+        optim = torch.optim.Adam(unet.parameters(), lr=FLAGS.lr) # ottimizzatore Adam solo unet
     sched = torch.optim.lr_scheduler.LambdaLR(optim, lr_lambda=warmup_lr) # permette di variare il learning rate durante l'addestramento
 
     # continue training
@@ -185,16 +198,20 @@ def train(argv):
             if FLAGS.hrf:
                 v0 = torch.randn_like(target)
                 tau, vtau, target = FM.sample_location_and_conditional_flow(v0, target)
-                # z = vae.get_latent_z()
                 # print(f'tau.shape: {tau.shape}, vtau.shape: {vtau.shape}, v0.shape: {v0.shape}, target.shape: {target.shape}')
-                z, mu, log_var = vae(v0, target, vtau, tau) #ottengo il latente z da passare al modello unet
-                #------------------------
-                pred = unet(tau, vtau, t, xt, z) #a_theta for hrf dove aggiungere il latente z
+                if FLAGS.variational: # get_latent z
+                    z, mu, log_var = vae(v0, target, vtau, tau) #get latent z di vae
+                    pred = unet(tau, vtau, t, xt, z) 
+                else:
+                    pred = unet(tau, vtau, t, xt)
             else:
-                pred = unet(t, xt) #v_t for RF
-            recon_loss = torch.mean((pred - target) ** 2)
-            kl_loss = _kl_divergence(mu, log_var).mean() # media del KL divergence su tutto il batch
-            loss = recon_loss + kl_loss * 1 # valutare il peso del KL loss beta = 1 
+                pred = unet(t, xt) 
+            if FLAGS.variational:
+                recon_loss = torch.mean((pred - target) ** 2)
+                kl_loss = _kl_divergence(mu, log_var).mean() # media del KL divergence su tutto il batch
+                loss = recon_loss - kl_loss * FLAGS.beta 
+            else:
+                loss = torch.mean((pred - target) ** 2)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(unet.parameters(), FLAGS.grad_clip)  
             optim.step()
