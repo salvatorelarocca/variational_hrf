@@ -70,7 +70,6 @@ class TimestepBlock(nn.Module):
     def forward(self, x, emb):
         """Apply the module to `x` given `emb` timestep embeddings."""
 
-
 '''concetto esteso alle sequenze di moduli. Ogni modulo nella sequenza che è un TimestepBlock riceve anche l'embedding del timestep.'''
 class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
     """A sequential module that passes timestep embeddings to the children that support it as an
@@ -79,9 +78,9 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
     def forward(self, x, emb):
         for layer in self:
             if isinstance(layer, TimestepBlock):
-                x = layer(x, emb) # forward con emb
+                x = layer(x, emb) 
             else:
-                x = layer(x) # forward senza emb
+                x = layer(x) 
         return x
 
 
@@ -170,6 +169,7 @@ class ResBlock(TimestepBlock):
         use_checkpoint=False,
         up=False,
         down=False,
+        z = None
     ):
         super().__init__()
         self.channels = channels
@@ -204,6 +204,7 @@ class ResBlock(TimestepBlock):
                 2 * self.out_channels if use_scale_shift_norm else self.out_channels,
             ),
         )
+
         self.out_layers = nn.Sequential(
             normalization(self.out_channels),
             nn.SiLU(),
@@ -227,7 +228,7 @@ class ResBlock(TimestepBlock):
         """
         return checkpoint(self._forward, (x, emb), self.parameters(), self.use_checkpoint)
 
-    def _forward(self, x, emb):
+    def _forward(self, x, emb, z=None):
         if self.updown:
             in_rest, in_conv = self.in_layers[:-1], self.in_layers[-1]
             h = in_rest(x)

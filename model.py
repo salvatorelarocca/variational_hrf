@@ -16,7 +16,7 @@ Successivamente, configura il modello in base al dataset:
 
 '''
 
-def get_model(dataset, data_shape, channel_mult, num_channel, device, hrf=True):
+def get_model(dataset, data_shape, channel_mult, num_channel, device, hrf=True, latent_dim=128, use_scale_shift=False):
     #selezione dei modelli
     if hrf:
         if dataset == "mnist":
@@ -56,10 +56,12 @@ def get_model(dataset, data_shape, channel_mult, num_channel, device, hrf=True):
             num_res_blocks=2, #qualsiasi numero non rompe la coerenza dell'archi, è un iperparametro da ottimizzare e scegliere
             num_channels=num_channel,
             channel_mult=channel_mult,
-            num_heads=4, #num_channels / num_heads deve essere divisibile per num_head_channels per restare coerente con l'architettura
-            num_head_channels=8,
+            num_heads=4, #num_channels / num_heads = num_head_channels per restare coerente con l'architettura
+            num_head_channels=16,
             attention_resolutions="16", # durante il downsample quando arriva a 16x16 applica l'attenzione
             dropout=0.1,
+            latent_dim=latent_dim,
+            use_scale_shift_norm=use_scale_shift
         ).to(
             device
         )

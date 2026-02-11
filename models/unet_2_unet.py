@@ -13,16 +13,17 @@ import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
 
-
 from models.fp16_util import convert_module_to_f16, convert_module_to_f32
 from models.nn import (
     checkpoint,
     conv_nd,
     linear,
+    lazylinear,
     normalization,
     timestep_embedding,
     zero_module,
 )
+
 from models.unet import (
     TimestepBlock,
     ResBlock,
@@ -31,14 +32,23 @@ from models.unet import (
     AttentionBlock,
 )
 
+class TimestepBlockWz(nn.Module):
+    """Any module where forward() takes timestep embeddings as a second argument."""
 
-class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
+    @abstractmethod
+    def forward(self, x, emb, z):
+        """Apply the module to `x` given `emb` timestep embeddings."""
+
+
+class TimestepEmbedSequential(nn.Sequential, TimestepBlockWz):
     """A sequential module that passes timestep embeddings to the children that support it as an
     extra input."""
 
-    def forward(self, x, emb):
+    def forward(self, x, emb, z=None):
         for layer in self:
-            if isinstance(layer, TimestepBlock):
+            if isinstance(layer, TimestepBlockWz):
+                x = layer(x, emb, z)
+            elif isinstance(layer, TimestepBlock):
                 x = layer(x, emb)
             else:
                 if isinstance(x, tuple):
@@ -47,7 +57,7 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
         return x
     
 
-class ResBlock_v(TimestepBlock):
+class ResBlock_v(TimestepBlockWz):
     """A residual block that can optionally change the number of channels.
 
     :param channels: the number of input channels.
@@ -74,6 +84,7 @@ class ResBlock_v(TimestepBlock):
         use_checkpoint=False,
         up=False,
         down=False,
+        latent_dim=128
     ):
         super().__init__()
         self.channels = channels
@@ -83,20 +94,21 @@ class ResBlock_v(TimestepBlock):
         self.use_conv = use_conv
         self.use_checkpoint = use_checkpoint
         self.use_scale_shift_norm = use_scale_shift_norm
+        self.latent_dim = latent_dim
 
         self.in_layers = nn.Sequential(
             normalization(channels),
             nn.SiLU(),
             conv_nd(dims, channels, self.out_channels, 3, padding=1),
         )
+
         self.in_layers_x = nn.Sequential(
             normalization(int(channels // 4)),
             nn.SiLU(),
             conv_nd(dims, int(channels // 4), 2 * self.out_channels if use_scale_shift_norm else self.out_channels, 3, padding=1),
         )
 
-
-
+        self.use_latent = True
         self.updown = up or down
 
         if up:
@@ -123,6 +135,15 @@ class ResBlock_v(TimestepBlock):
             ),
         )
 
+        '''Innesto latent z in rsblock'''
+        if self.use_latent:
+            self.emb_layers_z = nn.Sequential(
+                nn.SiLU(),
+                linear(self.latent_dim, 
+                       2 * self.out_channels if use_scale_shift_norm else self.out_channels,
+                ),
+            )
+        '''---------------------------------------------------'''
 
         self.out_layers = nn.Sequential(
             normalization(self.out_channels),
@@ -138,44 +159,67 @@ class ResBlock_v(TimestepBlock):
         else:
             self.skip_connection = conv_nd(dims, channels, self.out_channels, 1)
 
-    def forward(self, x, emb):
+    def forward(self, x, emb, z):
         """Apply the block to a Tensor, conditioned on a timestep embedding.
 
         :param x: an [N x C x ...] Tensor of features.
         :param emb: an [N x emb_channels] Tensor of timestep embeddings.
         :return: an [N x C x ...] Tensor of outputs.
         """
-        return checkpoint(self._forward, (x, emb), self.parameters(), self.use_checkpoint)
+        return checkpoint(self._forward, (x, emb, z), self.parameters(), self.use_checkpoint)
 
-    def _forward(self, x, emb):
+    def _forward(self, x, emb, z):
         if isinstance(x, tuple) and isinstance(emb, tuple):
             v, hx = x
             emb_tau, emb_t = emb
         else:
             raise TypeError("wrong type for ResBlock_v inputs")
-        if self.updown:
-            in_rest, in_conv = self.in_layers[:-1], self.in_layers[-1]
+        if self.updown: #se una delle due flag up or down è true
+            in_rest, in_conv = self.in_layers[:-1], self.in_layers[-1] #rest=tutti i blocchi tranne l'ultimo conv=ultimo blocco
             h = in_rest(v)
             h = self.h_upd(h)
             v = self.x_upd(v)
             h = in_conv(h)
         else:
             h = self.in_layers(v)
+        
         emb_hx = self.in_layers_x(hx)
         emb_out_tau = self.emb_layers_v(emb_tau).type(h.dtype)
         emb_out_t = self.emb_layers_x(emb_t).type(h.dtype)
+
+        if self.use_latent and z is not None:
+            print(z.shape)
+            emb_z = self.emb_layers_z(z)
+            print(emb_z.shape)
+        else:
+            emb_z = None
+            
+        #Aggiunge dimensioni (None) agli embedding finché non hanno lo stesso numero di dimensioni della feature map h
         while len(emb_out_t.shape) < len(h.shape):
             emb_out_tau = emb_out_tau[..., None]
             emb_out_t = emb_out_t[..., None]
+        
+        if emb_z is not None:
+            while len(emb_z.shape) < len(h.shape):
+                emb_z = emb_z[..., None]
+
         if self.use_scale_shift_norm:
             out_norm, out_rest = self.out_layers[0], self.out_layers[1:]
-            scale_hx, shift_hx = th.chunk(emb_hx, 2, dim=1)
+            scale_hx, shift_hx = th.chunk(emb_hx, 2, dim=1) #divide hx in due lungo i canali
             scale_tau, shift_tau = th.chunk(emb_out_tau, 2, dim=1)
             scale_t, shift_t = th.chunk(emb_out_t, 2, dim=1)
-            h = out_norm(h) * (1 + scale_hx + scale_tau + scale_t) + shift_hx + shift_tau + shift_t
+            scale = 1 + scale_hx + scale_tau + scale_t
+            shift = shift_hx + shift_tau + shift_t
+            if emb_z is not None: #creo lo scale shift anche per z
+                scale_z, shift_z = th.chunk(emb_z, 2, dim=1)
+                scale += scale_z
+                shift += shift_z
+            h = out_norm(h) * (scale) + shift #applico FiLM
             h = out_rest(h)
         else:
             h = h + emb_hx + emb_out_tau + emb_out_t
+            if emb_z is not None:
+                h = h + emb_z
             h = self.out_layers(h)
         return self.skip_connection(v) + h
 
@@ -231,6 +275,7 @@ class UNetModel(nn.Module):
         use_scale_shift_norm=False,
         resblock_updown=False,
         use_new_attention_order=False,
+        latent_dim=128
     ):
         super().__init__()
 
@@ -241,7 +286,6 @@ class UNetModel(nn.Module):
         self.in_channels = in_channels
         self.model_channels = model_channels
         self.out_channels = out_channels
-        self.latent_dim = 128
         self.num_res_blocks = num_res_blocks
         self.attention_resolutions = attention_resolutions
         self.dropout = dropout
@@ -253,8 +297,10 @@ class UNetModel(nn.Module):
         self.num_heads = num_heads
         self.num_head_channels = num_head_channels
         self.num_heads_upsample = num_heads_upsample
+        self.latent_dim=latent_dim
 
         time_embed_dim = model_channels * 4
+        print(f'time_embed_dim: {time_embed_dim}')
         self.time_embed_t_v = nn.Sequential(
             linear(model_channels, time_embed_dim),
             nn.SiLU(),
@@ -265,11 +311,7 @@ class UNetModel(nn.Module):
             nn.SiLU(),
             linear(time_embed_dim, time_embed_dim),
         )
-        self.emb_layers_z = nn.Sequential(
-            linear(self.latent_dim, time_embed_dim),
-            nn.SiLU(),
-            nn.Linear(self.latent_dim, time_embed_dim)
-        )
+
         
         if self.num_classes is not None:
             self.label_emb = nn.Embedding(num_classes, time_embed_dim)
@@ -294,6 +336,7 @@ class UNetModel(nn.Module):
                         dims=dims,
                         use_checkpoint=use_checkpoint,
                         use_scale_shift_norm=use_scale_shift_norm,
+                        latent_dim=self.latent_dim
                     )
                 ]
                 ch = int(mult * model_channels) # aggiorna la dimensione del canale dopo il blocco ResBlock_v
@@ -323,6 +366,7 @@ class UNetModel(nn.Module):
                             use_checkpoint=use_checkpoint,
                             use_scale_shift_norm=use_scale_shift_norm,
                             down=True,
+                            latent_dim=self.latent_dim
                         )
                         if resblock_updown
                         else Downsample(ch, conv_resample, dims=dims, out_channels=out_ch)
@@ -375,6 +419,7 @@ class UNetModel(nn.Module):
                         dims=dims,
                         use_checkpoint=use_checkpoint,
                         use_scale_shift_norm=use_scale_shift_norm,
+                        latent_dim=self.latent_dim
                     )
                 ]
                 ch = int(model_channels * mult)
@@ -400,6 +445,7 @@ class UNetModel(nn.Module):
                             use_checkpoint=use_checkpoint,
                             use_scale_shift_norm=use_scale_shift_norm,
                             up=True, #res in modalità upsampling
+                            latent_dim=self.latent_dim
                         )
                         if resblock_updown
                         else Upsample(ch, conv_resample, dims=dims, out_channels=out_ch)
@@ -587,10 +633,10 @@ class UNetModel(nn.Module):
         emb_t_v = self.time_embed_t_v(timestep_embedding(timesteps_v, self.model_channels)) #emb di t_v
         timesteps = self.process_t(t, x) #stesso per t
         emb_t = self.time_embed_t(timestep_embedding(timesteps, self.model_channels)) #emb di t
-        if z is not None:
-            emb_z = self.emb_layers_z(z) #emb di z
-            emb_t_v = emb_t_v + emb_z #aggiunge embedding z a entrambi gli embedding temporali
-            emb_t = emb_t + emb_z #stesso per t
+        # if z is not None:
+        #     emb_z = self.emb_layers_z(z) #emb di z
+        #     emb_t_v = emb_t_v + emb_z #aggiunge embedding z a entrambi gli embedding temporali
+        #     emb_t = emb_t + emb_z #stesso per t
         #non c'è concatenazione degli embedding qui
         if self.num_classes is not None: #se class conditional
             assert y.shape == (v.shape[0],) #batch size corrisponde
@@ -600,7 +646,9 @@ class UNetModel(nn.Module):
         hv = v.type(self.dtype)
         hx = x.type(self.dtype)
         for module, module_x in zip(self.input_blocks, self.input_blocks_x): #iterazione su le due liste di blocchi di input, uno per v e uno per x
-            hv = module((hv, hx), (emb_t_v, emb_t)) #hv dipende da hx
+            # print(module)
+            # print(module_x)
+            hv = module((hv, hx), (emb_t_v, emb_t), z) #hv dipende da hx
             hx = module_x(hx, emb_t) #hx dipende solo da emb_t evolve da solo
             hvs.append(hv) #salva le feature map di ogni blocco di input
             hxs.append(hx) #stesso per hx
@@ -609,11 +657,11 @@ class UNetModel(nn.Module):
         for idx in range(len(self.output_blocks) - 1):
             hv = th.cat([hv, hvs.pop()], dim=1) #concatena le feature map salvate, skip connection
             hx = th.cat([hx, hxs.pop()], dim=1) #stesso per hx
-            hv = self.output_blocks[idx]((hv, hx), (emb_t_v, emb_t))
+            hv = self.output_blocks[idx]((hv, hx), (emb_t_v, emb_t), z)
             hx = self.output_blocks_x[idx](hx, emb_t)
         hv = th.cat([hv, hvs.pop()], dim=1) 
         hx = th.cat([hx, hxs.pop()], dim=1)
-        hv = self.output_blocks[-1]((hv, hx), (emb_t_v, emb_t)) 
+        hv = self.output_blocks[-1]((hv, hx), (emb_t_v, emb_t), z) 
         hv = hv.type(v.dtype)
         return self.out(hv)
 
@@ -627,6 +675,7 @@ class UNetModelWrapper(UNetModel):
         dim,
         num_channels,
         num_res_blocks,
+        latent_dim,
         channel_mult=None,
         learn_sigma=False,
         class_cond=False,
@@ -684,6 +733,7 @@ class UNetModelWrapper(UNetModel):
             use_scale_shift_norm=use_scale_shift_norm,
             resblock_updown=resblock_updown,
             use_new_attention_order=use_new_attention_order,
+            latent_dim=latent_dim
         )
 
     def forward(self, t_v, v, t, xt, z=None, y=None, *args, **kwargs):

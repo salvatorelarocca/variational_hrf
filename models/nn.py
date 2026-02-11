@@ -43,6 +43,9 @@ def linear(*args, **kwargs):
     """Create a linear module."""
     return nn.Linear(*args, **kwargs)
 
+def lazylinear(*args, **kargs):
+    return nn.LazyLinear(*args, **kargs)
+
 
 def avg_pool_nd(dims, *args, **kwargs):
     """Create a 1D, 2D, or 3D average pooling module."""
@@ -92,8 +95,7 @@ def normalization(channels):
     :param channels: number of input channels.
     :return: an nn.Module for normalization.
     """
-    num_groups = min(32, channels)
-    return GroupNorm32(num_groups, channels)
+    return GroupNorm32(32, channels)
 
 
 def timestep_embedding(timesteps, dim, max_period=10000):

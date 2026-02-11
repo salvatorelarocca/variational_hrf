@@ -27,6 +27,7 @@ flags.DEFINE_enum("dataset", "cifar10", ["cifar10", "mnist", "imagenet32"], help
 flags.DEFINE_string("model", "for_cifar10mini", help="Choose the model...")
 flags.DEFINE_bool("hrf", False, help="train hrf or baseline") # False per baseline, True per hrf
 flags.DEFINE_integer("gpu", 0, help="GPU number")
+flags.DEFINE_bool("use_scale_shift_norm", False, help="use scale shift norm")
 
 # Variational HRF
 flags.DEFINE_bool("variational", False, help="train variational hrf or deterministic hrf")
@@ -142,6 +143,8 @@ def train(argv):
         FLAGS.num_channel,
         device,
         hrf=FLAGS.hrf,
+        latent_dim=FLAGS.latent_dim,
+        use_scale_shift=FLAGS.use_scale_shift_norm
     ) # crea il modello UNet
 
     if FLAGS.variational:
@@ -201,7 +204,7 @@ def train(argv):
                 # print(f'tau.shape: {tau.shape}, vtau.shape: {vtau.shape}, v0.shape: {v0.shape}, target.shape: {target.shape}')
                 if FLAGS.variational: # get_latent z
                     z, mu, log_var = vae(v0, target, vtau, tau) #get latent z di vae
-                    pred = unet(tau, vtau, t, xt, z) 
+                    pred = unet(tau, vtau, t, xt, z=z) 
                 else:
                     pred = unet(tau, vtau, t, xt)
             else:
@@ -209,7 +212,7 @@ def train(argv):
             if FLAGS.variational:
                 recon_loss = torch.mean((pred - target) ** 2)
                 kl_loss = _kl_divergence(mu, log_var).mean() # media del KL divergence su tutto il batch
-                loss = recon_loss - kl_loss * FLAGS.beta 
+                loss = recon_loss + kl_loss * FLAGS.beta 
             else:
                 loss = torch.mean((pred - target) ** 2)
             loss.backward()
