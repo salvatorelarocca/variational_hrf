@@ -23,8 +23,7 @@ FLAGS = flags.FLAGS
 flags.DEFINE_string("output_dir", "./", help="output directory")
 flags.DEFINE_string("imagenet_root", "./", help="root directory for imagenet")
 flags.DEFINE_string("exp_name", "base", help="experiment name")
-flags.DEFINE_enum("dataset", "cifar10", ["cifar10", "mnist", "imagenet32"], help="dataset name")
-flags.DEFINE_string("model", "for_cifar10mini", help="Choose the model...")
+flags.DEFINE_enum("dataset", "imagenet32", ["cifar10", "mnist", "imagenet32"], help="dataset name")
 flags.DEFINE_bool("hrf", False, help="train hrf or baseline") # False per baseline, True per hrf
 flags.DEFINE_integer("gpu", 0, help="GPU number")
 flags.DEFINE_bool("use_scale_shift_norm", False, help="use scale shift norm")
@@ -121,7 +120,7 @@ def train(argv):
         device = torch.device("cpu")
 
     '''Creazione delle cartelle per il salvataggio dei risultati'''
-    savedir = os.path.join(FLAGS.output_dir, f"results_{FLAGS.model}", f"{FLAGS.exp_name}")
+    savedir = os.path.join(FLAGS.output_dir, f"results_{FLAGS.dataset}", f"{FLAGS.exp_name}")
     os.makedirs(savedir, exist_ok=True)
     ckptdir = os.path.join(savedir, "ckpt")
     os.makedirs(ckptdir, exist_ok=True)
@@ -138,14 +137,15 @@ def train(argv):
     ) # riceve il dataloader infinito e la shape dei dati 
 
     unet = get_model(
-        FLAGS.model,
+        FLAGS.dataset,
         data_shape,
         FLAGS.channel_mult,
         FLAGS.num_channel,
         device,
         hrf=FLAGS.hrf,
         latent_dim=FLAGS.latent_dim,
-        use_scale_shift=FLAGS.use_scale_shift_norm
+        use_scale_shift=FLAGS.use_scale_shift_norm,
+        use_latent=FLAGS.variational, 
     ) # crea il modello UNet
 
     if FLAGS.variational:
@@ -250,7 +250,7 @@ def train(argv):
                         "optim": optim.state_dict(),
                         "step": step,
                     },
-                    os.path.join(ckptdir, f"{FLAGS.exp_name}_{FLAGS.model}_weights_step_{step}.pt"),
+                    os.path.join(ckptdir, f"{FLAGS.exp_name}_{FLAGS.dataset}_weights_step_{step}.pt"),
                 )
             if FLAGS.tb_step > 0 and step % FLAGS.tb_step == 0:
                 writer.add_scalar("training_loss", loss, step)

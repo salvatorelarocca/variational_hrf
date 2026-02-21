@@ -1,12 +1,10 @@
 """From https://raw.githubusercontent.com/openai/guided-diffusion/main/guided_diffusion/unet.py."""
 
-import math
 from abc import abstractmethod
 
-import numpy as np
 import torch as th
 import torch.nn as nn
-import torch.nn.functional as F
+
 
 from models.fp16_util import convert_module_to_f16, convert_module_to_f32
 from models.nn import (
@@ -75,6 +73,8 @@ class UNetModel(nn.Module):
         use_scale_shift_norm=False,
         resblock_updown=False,
         use_new_attention_order=False,
+        latent_dim=128,
+        use_latent=False,
     ):
         super().__init__()
 
@@ -96,6 +96,8 @@ class UNetModel(nn.Module):
         self.num_heads = num_heads
         self.num_head_channels = num_head_channels
         self.num_heads_upsample = num_heads_upsample
+        self.latent_dim = latent_dim
+        self.use_latent = use_latent
 
         time_embed_dim = model_channels * 4
         self.time_embed_t_v = nn.Sequential(
@@ -134,6 +136,8 @@ class UNetModel(nn.Module):
                         dims=dims,
                         use_checkpoint=use_checkpoint,
                         use_scale_shift_norm=use_scale_shift_norm,
+                        latent_dim=self.latent_dim,
+                        use_latent=self.use_latent,
                     )
                 ]
                 ch = int(mult * model_channels)
@@ -145,6 +149,8 @@ class UNetModel(nn.Module):
                             num_heads=num_heads,
                             num_head_channels=num_head_channels,
                             use_new_attention_order=use_new_attention_order,
+                            latent_dim=self.latent_dim,
+                            use_latent=self.use_latent,
                         )
                     )
                 self.input_blocks.append(TimestepEmbedSequential(*layers))
@@ -163,6 +169,8 @@ class UNetModel(nn.Module):
                             use_checkpoint=use_checkpoint,
                             use_scale_shift_norm=use_scale_shift_norm,
                             down=True,
+                            latent_dim=self.latent_dim,
+                            use_latent=self.use_latent,
                         )
                         if resblock_updown
                         else Downsample(ch, conv_resample, dims=dims, out_channels=out_ch)
@@ -181,6 +189,8 @@ class UNetModel(nn.Module):
                 dims=dims,
                 use_checkpoint=use_checkpoint,
                 use_scale_shift_norm=use_scale_shift_norm,
+                latent_dim=self.latent_dim,
+                use_latent=self.use_latent,
             ),
             AttentionBlock(
                 ch,
@@ -188,6 +198,8 @@ class UNetModel(nn.Module):
                 num_heads=num_heads,
                 num_head_channels=num_head_channels,
                 use_new_attention_order=use_new_attention_order,
+                latent_dim=self.latent_dim,
+                use_latent=self.use_latent,
             ),
             ResBlock(
                 ch,
@@ -196,6 +208,8 @@ class UNetModel(nn.Module):
                 dims=dims,
                 use_checkpoint=use_checkpoint,
                 use_scale_shift_norm=use_scale_shift_norm,
+                latent_dim=self.latent_dim,
+                use_latent=self.use_latent,
             ),
         )
         self._feature_size += ch
@@ -213,6 +227,8 @@ class UNetModel(nn.Module):
                         dims=dims,
                         use_checkpoint=use_checkpoint,
                         use_scale_shift_norm=use_scale_shift_norm,
+                        latent_dim=self.latent_dim,
+                        use_latent=self.use_latent,
                     )
                 ]
                 ch = int(model_channels * mult)
@@ -224,6 +240,8 @@ class UNetModel(nn.Module):
                             num_heads=num_heads_upsample,
                             num_head_channels=num_head_channels,
                             use_new_attention_order=use_new_attention_order,
+                            latent_dim=self.latent_dim,
+                            use_latent=self.use_latent,
                         )
                     )
                 if level and i == num_res_blocks:
@@ -238,6 +256,8 @@ class UNetModel(nn.Module):
                             use_checkpoint=use_checkpoint,
                             use_scale_shift_norm=use_scale_shift_norm,
                             up=True,
+                            latent_dim=self.latent_dim,
+                            use_latent=self.use_latent,
                         )
                         if resblock_updown
                         else Upsample(ch, conv_resample, dims=dims, out_channels=out_ch)
@@ -273,11 +293,12 @@ class UNetModel(nn.Module):
             timesteps = timesteps.repeat(x.shape[0])
         return timesteps
     
-    def forward(self, t_v, v, t, xt, y=None):
+    def forward(self, t_v, v, t, xt, z=None, y=None):
         """Apply the model to an input batch.
 
         :param x: an [N x C x ...] Tensor of inputs.
         :param timesteps: a 1-D batch of timesteps.
+        :param z: an optional [N x latent_dim] Tensor of latent conditioning.
         :param y: an [N] Tensor of labels, if class-conditional.
         :return: an [N x C x ...] Tensor of outputs.
         """
@@ -298,12 +319,12 @@ class UNetModel(nn.Module):
 
         h = th.cat([v.type(self.dtype), xt.type(self.dtype)], dim=1) # x e v concatenati lungo il canale
         for module in self.input_blocks: # passa tutti i blocchi di input DOWNSAMPLING
-            h = module(h, emb) #passa h=cat(v,xt) e emb, i canali aumentano e H,W diminuiscono
+            h = module(h, emb, z) #passa h=cat(v,xt) e emb, i canali aumentano e H,W diminuiscono
             hs.append(h) # salva le feature map di ogni blocco di input
-        h = self.middle_block(h, emb) # bottleneck
+        h = self.middle_block(h, emb, z) # bottleneck
         for module in self.output_blocks: # passa tutti i blocchi di output UPSAMPLING
             h = th.cat([h, hs.pop()], dim=1) # concatenazione skip connection
-            h = module(h, emb) # passa al blocco output
+            h = module(h, emb, z) # passa al blocco output
         h = h.type(v.dtype) 
         h = self.out(h) # convoluzione finale
         v, xt = th.chunk(h, 2, dim=1) # divide in 2 lungo il canale per riottenere v e xt
@@ -378,8 +399,9 @@ class UNetModelWrapper(UNetModel):
             use_scale_shift_norm=use_scale_shift_norm,
             resblock_updown=resblock_updown,
             use_new_attention_order=use_new_attention_order,
+            latent_dim=latent_dim,
+            use_latent=use_latent,
         )
 
-    def forward(self, t_v, v, t, xt, y=None, *args, **kwargs):
-        return super().forward(t_v, v, t, xt, y=y)
-    
+    def forward(self, t_v, v, t, xt, z=None, y=None, *args, **kwargs):
+        return super().forward(t_v, v, t, xt, z=z, y=y)

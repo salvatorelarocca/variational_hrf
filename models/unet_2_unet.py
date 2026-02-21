@@ -332,6 +332,8 @@ class UNetModel(nn.Module):
                             num_heads=num_heads,
                             num_head_channels=num_head_channels,
                             use_new_attention_order=use_new_attention_order,
+                            latent_dim=self.latent_dim,
+                            use_latent=self.use_latent,
                         )
                     )
                 self.input_blocks.append(TimestepEmbedSequential(*layers))
@@ -380,7 +382,9 @@ class UNetModel(nn.Module):
                 num_heads=num_heads,
                 num_head_channels=num_head_channels,
                 use_new_attention_order=use_new_attention_order,
-            ),
+                            latent_dim=self.latent_dim,
+                            use_latent=self.use_latent,
+                        ),
             ResBlock(
                 ch,
                 time_embed_dim,
@@ -389,7 +393,7 @@ class UNetModel(nn.Module):
                 use_checkpoint=use_checkpoint,
                 use_scale_shift_norm=use_scale_shift_norm,
                 use_latent=self.use_latent,
-                latent_dim=self.latent_dim,
+                            latent_dim=self.latent_dim,
             ),
         )
         self._feature_size += ch
@@ -421,6 +425,8 @@ class UNetModel(nn.Module):
                             num_heads=num_heads_upsample,
                             num_head_channels=num_head_channels,
                             use_new_attention_order=use_new_attention_order,
+                            latent_dim=self.latent_dim,
+                            use_latent=self.use_latent,
                         )
                     )
                 if level and i == num_res_blocks: #L’ultimo blocco di ogni livello (eccetto l’ultimo livello più basso) fa upsampling per risalire verso la risoluzione originale.
@@ -484,6 +490,8 @@ class UNetModel(nn.Module):
                             num_heads=num_heads,
                             num_head_channels=num_head_channels,
                             use_new_attention_order=use_new_attention_order,
+                            latent_dim=self.latent_dim,
+                            use_latent=self.use_latent,
                         )
                     )
                 self.input_blocks_x.append(TimestepEmbedSequential(*layers))
@@ -529,7 +537,9 @@ class UNetModel(nn.Module):
                 num_heads=num_heads,
                 num_head_channels=num_head_channels,
                 use_new_attention_order=use_new_attention_order,
-            ),
+                            latent_dim=self.latent_dim,
+                            use_latent=self.use_latent,
+                        ),
             ResBlock(
                 ch,
                 time_embed_dim,
@@ -569,6 +579,8 @@ class UNetModel(nn.Module):
                             num_heads=num_heads_upsample,
                             num_head_channels=num_head_channels,
                             use_new_attention_order=use_new_attention_order,
+                            latent_dim=self.latent_dim,
+                            use_latent=self.use_latent,
                         )
                     )
                 if level and i == num_res_blocks:

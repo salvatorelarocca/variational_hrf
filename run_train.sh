@@ -4,11 +4,13 @@
 #B C H W per ogni batch si dividono i canali in gruppi si effettua una normalizzazione per ogni gruppo separatamente
 #utilizzato se FM=ExactOptimalTransportConditionalFlowMatch
 python train.py \
---output_dir='./smoke_output' \
---exp_name='smoke_cirfar10_hrf' \
---dataset='cifar10' \
---model='for_cifar10mini' \
+--output_dir='./test' \
+--exp_name='mnist_HRF_variational' \
+--dataset='mnist' \
 --hrf=True \
+--variational=True \
+--latent_dim=128 \
+--beta=0.5 \
 --integration_method="euler" \
 --gpu=-1 \
 --num_channel=128 \
@@ -22,7 +24,4 @@ python train.py \
 --continue_train=False \
 --save_step=9 \
 --tb_step=0 \
---variational=True \
---latent_dim=128 \
---beta=0.5 \
 --use_scale_shift_norm=False \

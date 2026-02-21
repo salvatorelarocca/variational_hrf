@@ -276,12 +276,13 @@ class ResBlock(TimestepBlockWz):
 
         while len(emb_out.shape) < len(h.shape):
             emb_out = emb_out[..., None]
-            emb_z = emb_z[..., None] if self.use_latent else None
+            if emb_z is not None:
+                emb_z = emb_z[..., None]
         
         if self.use_scale_shift_norm:
             out_norm, out_rest = self.out_layers[0], self.out_layers[1:]
             scale, shift = th.chunk(emb_out, 2, dim=1)
-            if self.use_latent:
+            if emb_z is not None:
                 scale_z, shift_z = th.chunk(emb_z, 2, dim=1)
                 scale += scale_z
                 shift += shift_z
@@ -289,14 +290,20 @@ class ResBlock(TimestepBlockWz):
             h = out_rest(h)
         else:
             h = h + emb_out
-            if self.use_latent:
+            if emb_z is not None:
                 h = h + emb_z
             h = self.out_layers(h)
         return self.skip_connection(x) + h
 
 
-class AttentionBlock(nn.Module):
+class AttentionBlock(TimestepBlockWz):
     """An attention block that allows spatial positions to attend to each other.
+    Supporta opzionalmente il conditioning tramite variabile latente z,
+    iniettata come context token aggiuntivo nella sequenza di attenzione.
+
+    Strategia: z viene proiettato in un token [B, C, 1] e concatenato alla
+    sequenza spaziale [B, C, HW] prima del calcolo QKV. Ogni posizione spaziale
+    può quindi "attendere" a z direttamente nel meccanismo di attenzione.
 
     Originally ported from here, but adapted to the N-d case.
     https://github.com/hojonathanho/diffusion/blob/1e0dceb3b3495bbe19116a5e1b3596cd0706c543/diffusion_tf/models/unet.py#L66.
@@ -309,9 +316,13 @@ class AttentionBlock(nn.Module):
         num_head_channels=-1,
         use_checkpoint=False,
         use_new_attention_order=False,
+        latent_dim=128,
+        use_latent=False,
     ):
         super().__init__()
         self.channels = channels
+        self.use_latent = use_latent
+        self.latent_dim = latent_dim
         if num_head_channels == -1:
             self.num_heads = num_heads
         else:
@@ -331,14 +342,43 @@ class AttentionBlock(nn.Module):
 
         self.proj_out = zero_module(conv_nd(1, channels, channels, 1))
 
-    def forward(self, x):
-        return checkpoint(self._forward, (x,), self.parameters(), True)
+        '''Innesto latent z in AttentionBlock: z proiettato come context token'''
+        if self.use_latent:
+            # Proietta z nello spazio dei canali dell'attention (serve sia norm che proj)
+            self.z_norm = normalization(channels)
+            self.z_proj = nn.Sequential(
+                nn.SiLU(),
+                linear(latent_dim, channels),  # [B, latent_dim] -> [B, channels]
+            )
+        '''---------------------------------------------------'''
 
-    def _forward(self, x):
+    def forward(self, x, emb=None, z=None):
+        return checkpoint(self._forward, (x, z), self.parameters(), self.use_checkpoint)
+
+    def _forward(self, x, z=None):
         b, c, *spatial = x.shape
-        x = x.reshape(b, c, -1)
-        qkv = self.qkv(self.norm(x))
-        h = self.attention(qkv)
+        x = x.reshape(b, c, -1)  # [B, C, HW]
+
+        '''Innesto z: aggiunge un context token alla sequenza spaziale'''
+        if self.use_latent and z is not None:
+            print("Z DISPONIBILE&UTILIZZATA IN ATTENTION")
+            # Proietta z: [B, latent_dim] -> [B, C] -> [B, C, 1]
+            z_token = self.z_proj(z).unsqueeze(-1)          # [B, C, 1]
+            z_token = self.z_norm(z_token)                  # normalizza come gli altri token
+            # Concatena il token z alla sequenza: [B, C, HW+1]
+            x_with_z = th.cat([x, z_token], dim=-1)
+        else:
+            print("Z NON UTILIZZATA IN ATTENTION")
+            x_with_z = x
+        '''---------------------------------------------------'''
+
+        qkv = self.qkv(self.norm(x_with_z))   # QKV sull'intera sequenza (spaziale + z token)
+        h = self.attention(qkv)                # attenzione su [B, C, HW+1] o [B, C, HW]
+
+        # Rimuove il token z dall'output prima della skip connection
+        if self.use_latent and z is not None:
+            h = h[:, :, :-1]  # [B, C, HW] — scarta l'ultimo token (era z)
+
         h = self.proj_out(h)
         return (x + h).reshape(b, c, *spatial)
 
@@ -482,6 +522,8 @@ class UNetModel(nn.Module):
         use_scale_shift_norm=False,
         resblock_updown=False,
         use_new_attention_order=False,
+        latent_dim=128,
+        use_latent=False,
     ):
         super().__init__()
 
@@ -503,6 +545,8 @@ class UNetModel(nn.Module):
         self.num_heads = num_heads
         self.num_head_channels = num_head_channels
         self.num_heads_upsample = num_heads_upsample
+        self.latent_dim = latent_dim
+        self.use_latent = use_latent
 
         time_embed_dim = model_channels * 4
         self.time_embed = nn.Sequential(
@@ -543,6 +587,8 @@ class UNetModel(nn.Module):
                             num_heads=num_heads,
                             num_head_channels=num_head_channels,
                             use_new_attention_order=use_new_attention_order,
+                            latent_dim=self.latent_dim,
+                            use_latent=self.use_latent,
                         )
                     )
                 self.input_blocks.append(TimestepEmbedSequential(*layers))
@@ -586,6 +632,8 @@ class UNetModel(nn.Module):
                 num_heads=num_heads,
                 num_head_channels=num_head_channels,
                 use_new_attention_order=use_new_attention_order,
+                latent_dim=self.latent_dim,
+                use_latent=self.use_latent,
             ),
             ResBlock(
                 ch,
@@ -622,6 +670,8 @@ class UNetModel(nn.Module):
                             num_heads=num_heads_upsample,
                             num_head_channels=num_head_channels,
                             use_new_attention_order=use_new_attention_order,
+                            latent_dim=self.latent_dim,
+                            use_latent=self.use_latent,
                         )
                     )
                 if level and i == num_res_blocks:
@@ -662,11 +712,12 @@ class UNetModel(nn.Module):
         self.middle_block.apply(convert_module_to_f32)
         self.output_blocks.apply(convert_module_to_f32)
 
-    def forward(self, t, x, y=None):
+    def forward(self, t, x, z=None, y=None):
         """Apply the model to an input batch.
 
         :param x: an [N x C x ...] Tensor of inputs.
         :param timesteps: a 1-D batch of timesteps.
+        :param z: an optional [N x latent_dim] Tensor of latent conditioning.
         :param y: an [N] Tensor of labels, if class-conditional.
         :return: an [N x C x ...] Tensor of outputs.
         """
@@ -689,12 +740,12 @@ class UNetModel(nn.Module):
 
         h = x.type(self.dtype)
         for module in self.input_blocks:
-            h = module(h, emb)
+            h = module(h, emb, z)
             hs.append(h)
-        h = self.middle_block(h, emb)
+        h = self.middle_block(h, emb, z)
         for module in self.output_blocks:
             h = th.cat([h, hs.pop()], dim=1)
-            h = module(h, emb)
+            h = module(h, emb, z)
         h = h.type(x.dtype)
         return self.out(h)
 
@@ -943,6 +994,8 @@ class UNetModelWrapper(UNetModel):
         resblock_updown=False,
         use_fp16=False,
         use_new_attention_order=False,
+        latent_dim=128,
+        use_latent=False,
     ):
         """Dim (tuple): (C, H, W)"""
         image_size = dim[-1]
@@ -986,7 +1039,9 @@ class UNetModelWrapper(UNetModel):
             use_scale_shift_norm=use_scale_shift_norm,
             resblock_updown=resblock_updown,
             use_new_attention_order=use_new_attention_order,
+            latent_dim=latent_dim,
+            use_latent=use_latent,
         )
 
-    def forward(self, t, x, y=None, *args, **kwargs):
-        return super().forward(t, x, y=y)
+    def forward(self, t, x, z=None, y=None, *args, **kwargs):
+        return super().forward(t, x, z=z, y=y)
