@@ -333,6 +333,8 @@ class UNetModelWrapper(UNetModel):
         resblock_updown=False,
         use_fp16=False,
         use_new_attention_order=False,
+        use_latent=False,
+        latent_dim=128,
     ):
         """Dim (tuple): (C, H, W)"""
         image_size = dim[-1]

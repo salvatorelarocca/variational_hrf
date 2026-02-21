@@ -82,12 +82,12 @@ def sample_rf_dopri5(model, sample_shape, device):
     return xt, step_counter['steps'] #return x_1, nfe
 
 
-def sample_hrf(model, sample_shape, N, M, device, integration_method="euler", vae=None):
+def sample_hrf(model, sample_shape, N, M, device, integration_method="euler", latent_dim=128):
         if integration_method == "euler":
-            xt = sample_hrf_euler(model, vae, sample_shape, N, M, device)
+            xt = sample_hrf_euler(model, sample_shape, N, M, device, latent_dim=latent_dim)
             nfe = N * M
         elif integration_method == "dopri5":
-            xt, nfe = sample_hrf_dopri5(model, sample_shape, N, device)
+            xt, nfe = sample_hrf_dopri5(model, sample_shape, N, device, latent_dim=latent_dim)
         else:
             raise NotImplementedError
         return xt, nfe
@@ -97,28 +97,29 @@ Parametri:
 idem sopra
 Funzionalità: restituisce i campioni generati utilizzando il metodo di Eulero con il modello HRF
 '''
-def sample_hrf_euler(model, vae, sample_shape, N, M, device):
+def sample_hrf_euler(model, sample_shape, N, M, device, latent_dim=128):
     with torch.no_grad():
-        batchsize = sample_shape[0] # utilizzato in expand di seguito
+        batchsize = sample_shape[0] 
         xt = torch.randn(sample_shape, device=device) # x_0
         
         t_values = torch.arange(N, device=device) / N # tempo esterno
         tau_values = torch.arange(M, device=device) / M # tempo interno
 
         for i in range(N): # for esterno tempo t
-            t = t_values[i].expand(batchsize) # t_i
+            t = t_values[i].expand(batchsize)
             vtau = torch.randn(sample_shape, device=device) # v_0
             for j in range(M): # for interno tempo tau
-                tau = tau_values[j].expand(batchsize) 
-                # z, _, _ = vae(vtau, _, tau, t) # come target che metto???
-                a = model(tau, vtau, t, xt) # calcolo interazione interna
+                tau = tau_values[j].expand(batchsize)
+                #se cambio z e fisso gli altri parametri se il modello usa realmente z a z differenti dovrebbero corrispondere output differenti in modo significativo, viceversa il modello sta ignorando z
+                z = torch.randn(batchsize, latent_dim, device=device) # z~p(z)
+                a = model(tau, vtau, t, xt, z=z)
                 vtau += a / M # a * (1/M passo di integrazione)
             xt += vtau / N # a * (1/N passo di integrazione)
 
     return xt
 
 '''Equivalente a sopra ma con dopri5'''
-def sample_hrf_dopri5(model, sample_shape, N, device):
+def sample_hrf_dopri5(model, sample_shape, N, device, latent_dim=128):
     with torch.no_grad():
         batchsize = sample_shape[0]
         xt = torch.randn(sample_shape, device=device)
@@ -127,8 +128,9 @@ def sample_hrf_dopri5(model, sample_shape, N, device):
         for i in range(N):
             t = t_values[i].expand(batchsize)
             def wrapped_model(tau, vtau):
-                step_counter["steps"] += 1 
-                return model(tau, vtau, t, xt)
+                step_counter["steps"] += 1
+                z = torch.randn(batchsize, latent_dim, device=device) # z~p(z)
+                return model(tau, vtau, t, xt, z=z)
             tau_span = torch.linspace(0, 1, 2, device=device)
             vtau = odeint(
                 wrapped_model, 
@@ -146,7 +148,7 @@ def sample_hrf_dopri5(model, sample_shape, N, device):
 '''
 
 '''
-def generate_samples(model, savedir, step, shape, device, net_="normal", hrf=True):
+def generate_samples(model, savedir, step, shape, device, net_="normal", integration_method="euler", hrf=True, latent_dim=128):
     """Save generated images for sanity check along training.
 
     Parameters
@@ -163,7 +165,7 @@ def generate_samples(model, savedir, step, shape, device, net_="normal", hrf=Tru
     model_ = copy.deepcopy(model) # crea una copia del modello per il campionamento
 
     if hrf:
-        samples, _ = sample_hrf(model_, shape, 1, 100, device) # hrf + euler, t=1 e tau=100 di default a nfe 100
+        samples, _ = sample_hrf(model_, shape, 1, 10, device, integration_method=integration_method, latent_dim=latent_dim) # hrf + euler, t=1 e tau=100 di default a nfe 100
     else:
         samples, _ = sample_rf(model_, shape, 100, device) # rf + euler di default a nfe 100
     

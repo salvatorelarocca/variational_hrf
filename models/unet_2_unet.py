@@ -25,37 +25,14 @@ from models.nn import (
 )
 
 from models.unet import (
-    TimestepBlock,
+    TimestepBlockWz,
+    TimestepEmbedSequential,
     ResBlock,
     Upsample,
     Downsample,
     AttentionBlock,
 )
 
-class TimestepBlockWz(nn.Module):
-    """Any module where forward() takes timestep embeddings as a second argument."""
-
-    @abstractmethod
-    def forward(self, x, emb, z):
-        """Apply the module to `x` given `emb` timestep embeddings."""
-
-
-class TimestepEmbedSequential(nn.Sequential, TimestepBlockWz):
-    """A sequential module that passes timestep embeddings to the children that support it as an
-    extra input."""
-
-    def forward(self, x, emb, z=None):
-        for layer in self:
-            if isinstance(layer, TimestepBlockWz):
-                x = layer(x, emb, z)
-            elif isinstance(layer, TimestepBlock):
-                x = layer(x, emb)
-            else:
-                if isinstance(x, tuple):
-                    x, _ = x
-                x = layer(x)
-        return x
-    
 
 class ResBlock_v(TimestepBlockWz):
     """A residual block that can optionally change the number of channels.
@@ -84,7 +61,8 @@ class ResBlock_v(TimestepBlockWz):
         use_checkpoint=False,
         up=False,
         down=False,
-        latent_dim=128
+        latent_dim=128,
+        use_latent=False
     ):
         super().__init__()
         self.channels = channels
@@ -95,6 +73,7 @@ class ResBlock_v(TimestepBlockWz):
         self.use_checkpoint = use_checkpoint
         self.use_scale_shift_norm = use_scale_shift_norm
         self.latent_dim = latent_dim
+        self.use_latent = use_latent
 
         self.in_layers = nn.Sequential(
             normalization(channels),
@@ -108,7 +87,6 @@ class ResBlock_v(TimestepBlockWz):
             conv_nd(dims, int(channels // 4), 2 * self.out_channels if use_scale_shift_norm else self.out_channels, 3, padding=1),
         )
 
-        self.use_latent = True
         self.updown = up or down
 
         if up:
@@ -135,7 +113,7 @@ class ResBlock_v(TimestepBlockWz):
             ),
         )
 
-        '''Innesto latent z in rsblock'''
+        '''Innesto latent z in rsblock_v'''
         if self.use_latent:
             self.emb_layers_z = nn.Sequential(
                 nn.SiLU(),
@@ -159,7 +137,7 @@ class ResBlock_v(TimestepBlockWz):
         else:
             self.skip_connection = conv_nd(dims, channels, self.out_channels, 1)
 
-    def forward(self, x, emb, z):
+    def forward(self, x, emb, z=None):
         """Apply the block to a Tensor, conditioned on a timestep embedding.
 
         :param x: an [N x C x ...] Tensor of features.
@@ -168,7 +146,7 @@ class ResBlock_v(TimestepBlockWz):
         """
         return checkpoint(self._forward, (x, emb, z), self.parameters(), self.use_checkpoint)
 
-    def _forward(self, x, emb, z):
+    def _forward(self, x, emb, z=None):
         if isinstance(x, tuple) and isinstance(emb, tuple):
             v, hx = x
             emb_tau, emb_t = emb
@@ -188,9 +166,7 @@ class ResBlock_v(TimestepBlockWz):
         emb_out_t = self.emb_layers_x(emb_t).type(h.dtype)
 
         if self.use_latent and z is not None:
-            print(z.shape)
             emb_z = self.emb_layers_z(z)
-            print(emb_z.shape)
         else:
             emb_z = None
             
@@ -275,7 +251,8 @@ class UNetModel(nn.Module):
         use_scale_shift_norm=False,
         resblock_updown=False,
         use_new_attention_order=False,
-        latent_dim=128
+        latent_dim=128,
+        use_latent=True
     ):
         super().__init__()
 
@@ -298,6 +275,7 @@ class UNetModel(nn.Module):
         self.num_head_channels = num_head_channels
         self.num_heads_upsample = num_heads_upsample
         self.latent_dim=latent_dim
+        self.use_latent = use_latent
 
         time_embed_dim = model_channels * 4
         print(f'time_embed_dim: {time_embed_dim}')
@@ -336,6 +314,7 @@ class UNetModel(nn.Module):
                         dims=dims,
                         use_checkpoint=use_checkpoint,
                         use_scale_shift_norm=use_scale_shift_norm,
+                        use_latent=self.use_latent,
                         latent_dim=self.latent_dim
                     )
                 ]
@@ -366,6 +345,7 @@ class UNetModel(nn.Module):
                             use_checkpoint=use_checkpoint,
                             use_scale_shift_norm=use_scale_shift_norm,
                             down=True,
+                            use_latent=self.use_latent,
                             latent_dim=self.latent_dim
                         )
                         if resblock_updown
@@ -386,6 +366,8 @@ class UNetModel(nn.Module):
                 dims=dims,
                 use_checkpoint=use_checkpoint,
                 use_scale_shift_norm=use_scale_shift_norm,
+                use_latent=self.use_latent,
+                latent_dim=self.latent_dim
             ),
             AttentionBlock(
                 ch,
@@ -419,6 +401,7 @@ class UNetModel(nn.Module):
                         dims=dims,
                         use_checkpoint=use_checkpoint,
                         use_scale_shift_norm=use_scale_shift_norm,
+                        use_latent=self.use_latent,
                         latent_dim=self.latent_dim
                     )
                 ]
@@ -445,6 +428,7 @@ class UNetModel(nn.Module):
                             use_checkpoint=use_checkpoint,
                             use_scale_shift_norm=use_scale_shift_norm,
                             up=True, #res in modalità upsampling
+                            use_latent=self.use_latent,
                             latent_dim=self.latent_dim
                         )
                         if resblock_updown
@@ -646,8 +630,6 @@ class UNetModel(nn.Module):
         hv = v.type(self.dtype)
         hx = x.type(self.dtype)
         for module, module_x in zip(self.input_blocks, self.input_blocks_x): #iterazione su le due liste di blocchi di input, uno per v e uno per x
-            # print(module)
-            # print(module_x)
             hv = module((hv, hx), (emb_t_v, emb_t), z) #hv dipende da hx
             hx = module_x(hx, emb_t) #hx dipende solo da emb_t evolve da solo
             hvs.append(hv) #salva le feature map di ogni blocco di input
@@ -690,6 +672,7 @@ class UNetModelWrapper(UNetModel):
         resblock_updown=False,
         use_fp16=False,
         use_new_attention_order=False,
+        use_latent=True
     ):
         """Dim (tuple): (C, H, W)"""
         image_size = dim[-1]
@@ -733,7 +716,8 @@ class UNetModelWrapper(UNetModel):
             use_scale_shift_norm=use_scale_shift_norm,
             resblock_updown=resblock_updown,
             use_new_attention_order=use_new_attention_order,
-            latent_dim=latent_dim
+            latent_dim=latent_dim,
+            use_latent=use_latent
         )
 
     def forward(self, t_v, v, t, xt, z=None, y=None, *args, **kwargs):

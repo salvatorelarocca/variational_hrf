@@ -28,6 +28,7 @@ flags.DEFINE_string("model", "for_cifar10mini", help="Choose the model...")
 flags.DEFINE_bool("hrf", False, help="train hrf or baseline") # False per baseline, True per hrf
 flags.DEFINE_integer("gpu", 0, help="GPU number")
 flags.DEFINE_bool("use_scale_shift_norm", False, help="use scale shift norm")
+flags.DEFINE_enum("integration_method", "euler", ["euler", "dopri5"], help="integration method for sampling") # metodo di integrazione per il campionamento, euler o dopri5
 
 # Variational HRF
 flags.DEFINE_bool("variational", False, help="train variational hrf or deterministic hrf")
@@ -212,21 +213,34 @@ def train(argv):
             if FLAGS.variational:
                 recon_loss = torch.mean((pred - target) ** 2)
                 kl_loss = _kl_divergence(mu, log_var).mean() # media del KL divergence su tutto il batch
-                loss = recon_loss + kl_loss * FLAGS.beta 
+                loss = recon_loss + kl_loss * FLAGS.beta
             else:
                 loss = torch.mean((pred - target) ** 2)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(unet.parameters(), FLAGS.grad_clip)  
             optim.step()
             sched.step()
-            ema(unet, ema_model, FLAGS.ema_decay)  
-            pbar.set_description(f'loss: {loss.item():.4f}')
-            pbar.update(1)
+            ema(unet, ema_model, FLAGS.ema_decay)
+            pbar.set_description("Train step: %d" % step)
+            if FLAGS.variational:
+                pbar.set_postfix(
+                    loss=f"{loss.item():.4f}",
+                    kl=f"{kl_loss.item():.4f}",
+                    mu=f"{mu.mean().item():.4f}",
+                    log_var=f"{log_var.mean().item():.4f}"
+                )
+            else:
+                pbar.set_postfix(
+                    loss=f"{loss.item():.4f}"
+                )
+            
             
             # sample and Saving the weights
             if FLAGS.save_step > 0 and step % FLAGS.save_step == 0:
-                generate_samples(unet, imgdir, step, (16, *data_shape), device, net_="normal", hrf=FLAGS.hrf)
-                generate_samples(ema_model, imgdir, step, (16, *data_shape), device, net_="ema", hrf=FLAGS.hrf)
+                print(f"\ngenerating samples with {FLAGS.integration_method} method at step {step}...")
+                generate_samples(unet, imgdir, step, (16, *data_shape), device, net_="normal", integration_method=FLAGS.integration_method, hrf=FLAGS.hrf, latent_dim=FLAGS.latent_dim)
+                print(f"\ngenerating samples with {FLAGS.integration_method} method and EMA at step {step}...")
+                generate_samples(ema_model, imgdir, step, (16, *data_shape), device, net_="ema", integration_method=FLAGS.integration_method, hrf=FLAGS.hrf, latent_dim=FLAGS.latent_dim)
                 torch.save(
                     {
                         "model": unet.state_dict(),

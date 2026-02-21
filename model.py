@@ -61,6 +61,7 @@ def get_model(dataset, data_shape, channel_mult, num_channel, device, hrf=True, 
             attention_resolutions="16", # durante il downsample quando arriva a 16x16 applica l'attenzione
             dropout=0.1,
             latent_dim=latent_dim,
+            use_latent=True,
             use_scale_shift_norm=use_scale_shift
         ).to(
             device

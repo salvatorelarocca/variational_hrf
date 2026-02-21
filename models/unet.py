@@ -70,17 +70,30 @@ class TimestepBlock(nn.Module):
     def forward(self, x, emb):
         """Apply the module to `x` given `emb` timestep embeddings."""
 
-'''concetto esteso alle sequenze di moduli. Ogni modulo nella sequenza che è un TimestepBlock riceve anche l'embedding del timestep.'''
-class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
+class TimestepBlockWz(TimestepBlock):
+    """Any module where forward() takes timestep embeddings as a second argument."""
+
+    @abstractmethod
+    def forward(self, x, emb, z):
+        """Apply the module to `x` given `emb` timestep embeddings."""
+
+
+'''osservazioni, se si vuole scalare meglio bisogna rendere emb e z opzionali'''
+
+class TimestepEmbedSequential(nn.Sequential, TimestepBlockWz):
     """A sequential module that passes timestep embeddings to the children that support it as an
     extra input."""
 
-    def forward(self, x, emb):
+    def forward(self, x, emb, z=None):
         for layer in self:
-            if isinstance(layer, TimestepBlock):
-                x = layer(x, emb) 
+            if isinstance(layer, TimestepBlockWz):
+                x = layer(x, emb, z)
+            elif isinstance(layer, TimestepBlock):
+                x = layer(x, emb)
             else:
-                x = layer(x) 
+                if isinstance(x, tuple):
+                    x, _ = x
+                x = layer(x)
         return x
 
 
@@ -142,7 +155,7 @@ class Downsample(nn.Module):
 
 '''Residual block con supporto per l'embedding del timestep.
 Utilizzato come meccanisco di stabilizzazione della rete UNet.'''
-class ResBlock(TimestepBlock):
+class ResBlock(TimestepBlockWz):
     """A residual block that can optionally change the number of channels.
 
     :param channels: the number of input channels.
@@ -169,7 +182,8 @@ class ResBlock(TimestepBlock):
         use_checkpoint=False,
         up=False,
         down=False,
-        z = None
+        latent_dim=128,
+        use_latent=False
     ):
         super().__init__()
         self.channels = channels
@@ -179,6 +193,8 @@ class ResBlock(TimestepBlock):
         self.use_conv = use_conv
         self.use_checkpoint = use_checkpoint
         self.use_scale_shift_norm = use_scale_shift_norm
+        self.latent_dim = latent_dim
+        self.use_latent = use_latent
 
         self.in_layers = nn.Sequential(
             normalization(channels),
@@ -204,6 +220,15 @@ class ResBlock(TimestepBlock):
                 2 * self.out_channels if use_scale_shift_norm else self.out_channels,
             ),
         )
+        '''Innesto latent z in rsblock'''
+        # if self.use_latent:
+        #     self.emb_layers_z = nn.Sequential(
+        #         nn.SiLU(),
+        #         linear(self.latent_dim, 
+        #                2 * self.out_channels if use_scale_shift_norm else self.out_channels,
+        #         ),
+        #     )
+        '''---------------------------------'''
 
         self.out_layers = nn.Sequential(
             normalization(self.out_channels),
@@ -219,14 +244,14 @@ class ResBlock(TimestepBlock):
         else:
             self.skip_connection = conv_nd(dims, channels, self.out_channels, 1)
 
-    def forward(self, x, emb):
+    def forward(self, x, emb, z=None):
         """Apply the block to a Tensor, conditioned on a timestep embedding.
 
         :param x: an [N x C x ...] Tensor of features.
         :param emb: an [N x emb_channels] Tensor of timestep embeddings.
         :return: an [N x C x ...] Tensor of outputs.
         """
-        return checkpoint(self._forward, (x, emb), self.parameters(), self.use_checkpoint)
+        return checkpoint(self._forward, (x, emb, z), self.parameters(), self.use_checkpoint)
 
     def _forward(self, x, emb, z=None):
         if self.updown:
@@ -238,15 +263,29 @@ class ResBlock(TimestepBlock):
         else:
             h = self.in_layers(x)
         emb_out = self.emb_layers(emb).type(h.dtype)
+        
+        # if self.use_latent:
+        #     emb_z = self.emb_layers_z(z)
+        # else:
+        #     emb_z = None
+
         while len(emb_out.shape) < len(h.shape):
             emb_out = emb_out[..., None]
+            # emb_z = emb_z[..., None] if self.use_latent else None
+        
         if self.use_scale_shift_norm:
             out_norm, out_rest = self.out_layers[0], self.out_layers[1:]
             scale, shift = th.chunk(emb_out, 2, dim=1)
+            # if self.use_latent:
+            #     scale_z, shift_z = th.chunk(emb_z, 2, dim=1)
+            #     scale += scale_z
+            #     shift += shift_z
             h = out_norm(h) * (1 + scale) + shift
             h = out_rest(h)
         else:
             h = h + emb_out
+            # if self.use_latent:
+            #     h = h + emb_z
             h = self.out_layers(h)
         return self.skip_connection(x) + h
 
