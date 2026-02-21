@@ -166,10 +166,15 @@ class ResBlock_v(TimestepBlockWz):
         emb_out_t = self.emb_layers_x(emb_t).type(h.dtype)
 
         if self.use_latent and z is not None:
+            print("Z DISPONIBILE&UTILIZZATA")
             emb_z = self.emb_layers_z(z)
-        else:
+        elif self.use_latent and z is None:
+            print("Z NON DISPOSIBILE")
             emb_z = None
-            
+        elif not self.use_latent:
+            print("Z DISPONIBILE/NON UTILIZZATA")
+            emb_z = None
+                
         #Aggiunge dimensioni (None) agli embedding finché non hanno lo stesso numero di dimensioni della feature map h
         while len(emb_out_t.shape) < len(h.shape):
             emb_out_tau = emb_out_tau[..., None]
@@ -383,6 +388,8 @@ class UNetModel(nn.Module):
                 dims=dims,
                 use_checkpoint=use_checkpoint,
                 use_scale_shift_norm=use_scale_shift_norm,
+                use_latent=self.use_latent,
+                latent_dim=self.latent_dim,
             ),
         )
         self._feature_size += ch
@@ -464,6 +471,8 @@ class UNetModel(nn.Module):
                         dims=dims,
                         use_checkpoint=use_checkpoint,
                         use_scale_shift_norm=use_scale_shift_norm,
+                        use_latent=self.use_latent,
+                        latent_dim=self.latent_dim
                     )
                 ]
                 ch = int(mult * model_channels)
@@ -511,6 +520,8 @@ class UNetModel(nn.Module):
                 dims=dims,
                 use_checkpoint=use_checkpoint,
                 use_scale_shift_norm=use_scale_shift_norm,
+                use_latent=self.use_latent,
+                latent_dim=self.latent_dim
             ),
             AttentionBlock(
                 ch,
@@ -526,6 +537,8 @@ class UNetModel(nn.Module):
                 dims=dims,
                 use_checkpoint=use_checkpoint,
                 use_scale_shift_norm=use_scale_shift_norm,
+                use_latent=self.use_latent,
+                latent_dim=self.latent_dim
             ),
         )
         self._feature_size += ch
@@ -543,6 +556,8 @@ class UNetModel(nn.Module):
                         dims=dims,
                         use_checkpoint=use_checkpoint,
                         use_scale_shift_norm=use_scale_shift_norm,
+                        use_latent=self.use_latent,
+                        latent_dim=self.latent_dim
                     )
                 ]
                 ch = int(model_channels * mult)
@@ -568,6 +583,8 @@ class UNetModel(nn.Module):
                             use_checkpoint=use_checkpoint,
                             use_scale_shift_norm=use_scale_shift_norm,
                             up=True,
+                            use_latent=self.use_latent,
+                            latent_dim=self.latent_dim
                         )
                         if resblock_updown
                         else Upsample(ch, conv_resample, dims=dims, out_channels=out_ch)
@@ -617,11 +634,7 @@ class UNetModel(nn.Module):
         emb_t_v = self.time_embed_t_v(timestep_embedding(timesteps_v, self.model_channels)) #emb di t_v
         timesteps = self.process_t(t, x) #stesso per t
         emb_t = self.time_embed_t(timestep_embedding(timesteps, self.model_channels)) #emb di t
-        # if z is not None:
-        #     emb_z = self.emb_layers_z(z) #emb di z
-        #     emb_t_v = emb_t_v + emb_z #aggiunge embedding z a entrambi gli embedding temporali
-        #     emb_t = emb_t + emb_z #stesso per t
-        #non c'è concatenazione degli embedding qui
+    
         if self.num_classes is not None: #se class conditional
             assert y.shape == (v.shape[0],) #batch size corrisponde
             emb_t_v = emb_t_v + self.label_emb(y) #aggiunge embedding label a entrambi gli embedding temporali
@@ -631,16 +644,16 @@ class UNetModel(nn.Module):
         hx = x.type(self.dtype)
         for module, module_x in zip(self.input_blocks, self.input_blocks_x): #iterazione su le due liste di blocchi di input, uno per v e uno per x
             hv = module((hv, hx), (emb_t_v, emb_t), z) #hv dipende da hx
-            hx = module_x(hx, emb_t) #hx dipende solo da emb_t evolve da solo
+            hx = module_x(hx, emb_t, z) #hx dipende solo da emb_t evolve da solo
             hvs.append(hv) #salva le feature map di ogni blocco di input
             hxs.append(hx) #stesso per hx
-        hv = self.middle_block(hv, emb_t_v) # bottleneck applicato a hv
-        hx = self.middle_block_x(hx, emb_t) # stesso per hx
+        hv = self.middle_block(hv, emb_t_v, z) # bottleneck applicato a hv
+        hx = self.middle_block_x(hx, emb_t, z) # stesso per hx
         for idx in range(len(self.output_blocks) - 1):
             hv = th.cat([hv, hvs.pop()], dim=1) #concatena le feature map salvate, skip connection
             hx = th.cat([hx, hxs.pop()], dim=1) #stesso per hx
             hv = self.output_blocks[idx]((hv, hx), (emb_t_v, emb_t), z)
-            hx = self.output_blocks_x[idx](hx, emb_t)
+            hx = self.output_blocks_x[idx](hx, emb_t, z)
         hv = th.cat([hv, hvs.pop()], dim=1) 
         hx = th.cat([hx, hxs.pop()], dim=1)
         hv = self.output_blocks[-1]((hv, hx), (emb_t_v, emb_t), z) 

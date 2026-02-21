@@ -87,11 +87,11 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlockWz):
     def forward(self, x, emb, z=None):
         for layer in self:
             if isinstance(layer, TimestepBlockWz):
+                print(f"{layer.__class__.__name__}")
                 x = layer(x, emb, z)
-            elif isinstance(layer, TimestepBlock):
-                x = layer(x, emb)
             else:
                 if isinstance(x, tuple):
+                    print(f"{layer.__class__.__name__}")
                     x, _ = x
                 x = layer(x)
         return x
@@ -221,13 +221,13 @@ class ResBlock(TimestepBlockWz):
             ),
         )
         '''Innesto latent z in rsblock'''
-        # if self.use_latent:
-        #     self.emb_layers_z = nn.Sequential(
-        #         nn.SiLU(),
-        #         linear(self.latent_dim, 
-        #                2 * self.out_channels if use_scale_shift_norm else self.out_channels,
-        #         ),
-        #     )
+        if self.use_latent:
+            self.emb_layers_z = nn.Sequential(
+                nn.SiLU(),
+                linear(self.latent_dim, 
+                       2 * self.out_channels if use_scale_shift_norm else self.out_channels,
+                ),
+            )
         '''---------------------------------'''
 
         self.out_layers = nn.Sequential(
@@ -263,29 +263,34 @@ class ResBlock(TimestepBlockWz):
         else:
             h = self.in_layers(x)
         emb_out = self.emb_layers(emb).type(h.dtype)
-        
-        # if self.use_latent:
-        #     emb_z = self.emb_layers_z(z)
-        # else:
-        #     emb_z = None
+
+        if self.use_latent and z is not None:
+            print("Z DISPONIBILE&UTILIZZATA")
+            emb_z = self.emb_layers_z(z)
+        elif self.use_latent and z is None:
+            print("Z NON DISPOSIBILE")
+            emb_z = None
+        elif not self.use_latent:
+            print("Z DISPONIBILE/NON UTILIZZATA")
+            emb_z = None
 
         while len(emb_out.shape) < len(h.shape):
             emb_out = emb_out[..., None]
-            # emb_z = emb_z[..., None] if self.use_latent else None
+            emb_z = emb_z[..., None] if self.use_latent else None
         
         if self.use_scale_shift_norm:
             out_norm, out_rest = self.out_layers[0], self.out_layers[1:]
             scale, shift = th.chunk(emb_out, 2, dim=1)
-            # if self.use_latent:
-            #     scale_z, shift_z = th.chunk(emb_z, 2, dim=1)
-            #     scale += scale_z
-            #     shift += shift_z
+            if self.use_latent:
+                scale_z, shift_z = th.chunk(emb_z, 2, dim=1)
+                scale += scale_z
+                shift += shift_z
             h = out_norm(h) * (1 + scale) + shift
             h = out_rest(h)
         else:
             h = h + emb_out
-            # if self.use_latent:
-            #     h = h + emb_z
+            if self.use_latent:
+                h = h + emb_z
             h = self.out_layers(h)
         return self.skip_connection(x) + h
 
