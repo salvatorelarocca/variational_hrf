@@ -287,7 +287,7 @@ class UNetModel(nn.Module):
     def process_t(self, t, x):
         timesteps = t
         while timesteps.dim() > 1:
-            print(timesteps.shape)
+            # print(timesteps.shape)
             timesteps = timesteps[:, 0]
         if timesteps.dim() == 0:
             timesteps = timesteps.repeat(x.shape[0])

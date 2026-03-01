@@ -1,5 +1,6 @@
 import copy
 import os
+import json
 
 import torch
 from absl import app, flags # per la gestione delle flags da linea di comando pacchetto absl-py
@@ -9,7 +10,7 @@ from vae.vae_model import BetaVAE
 
 
 from dataset import get_datalooper
-from model import get_model
+from choose_model import get_model
 
 from utils import ema, generate_samples, load_model
 from cfm import (
@@ -24,7 +25,6 @@ flags.DEFINE_string("output_dir", "./", help="output directory")
 flags.DEFINE_string("imagenet_root", "./", help="root directory for imagenet")
 flags.DEFINE_string("exp_name", "base", help="experiment name")
 flags.DEFINE_enum("dataset", "imagenet32", ["cifar10", "mnist", "imagenet32"], help="dataset name")
-flags.DEFINE_bool("hrf", False, help="train hrf or baseline") # False per baseline, True per hrf
 flags.DEFINE_integer("gpu", 0, help="GPU number")
 flags.DEFINE_bool("use_scale_shift_norm", False, help="use scale shift norm")
 flags.DEFINE_enum("integration_method", "euler", ["euler", "dopri5"], help="integration method for sampling") # metodo di integrazione per il campionamento, euler o dopri5
@@ -37,6 +37,7 @@ flags.DEFINE_float("beta", 1.0, help="weight of the KL divergence loss in the VA
 # UNet
 flags.DEFINE_integer("num_channel", 128, help="base channel of UNet, 3 channels RGB became 128 channels in the first layer of UNet")
 flags.DEFINE_list("channel_mult", [1, 2, 2, 2], help="channel_mult of UNet")
+flags.DEFINE_enum("model_type", "baseline", ["baseline", "unet_cat_hrf", "2unet_hrf"], help="architecture Unet to use, for baseline set variational to False")
 
 # Training
 flags.DEFINE_float("lr", 2e-4, help="target learning rate")  # TRY 2e-4
@@ -77,6 +78,7 @@ flags.DEFINE_integer(
     20000,
     help="frequency of saving checkpoints, 0 to disable during training",
 )
+
 flags.DEFINE_integer(
     "tb_step",
     50,
@@ -128,6 +130,21 @@ def train(argv):
     os.makedirs(imgdir, exist_ok=True)
     writer = tensorboard.SummaryWriter(savedir)
 
+    '''Salvataggio della configurazione dell'esperimento in file json'''
+    model_config = {
+        "dataset":              FLAGS.dataset,
+        "model_type":           FLAGS.model_type,
+        "num_channel":          FLAGS.num_channel,
+        "channel_mult":         [int(x) for x in FLAGS.channel_mult],
+        "latent_dim":           FLAGS.latent_dim,
+        "variational":          FLAGS.variational,
+        "use_scale_shift_norm": FLAGS.use_scale_shift_norm,
+    }
+    config_path = os.path.join(savedir, "config.json")
+    with open(config_path, "w") as f:
+        json.dump(model_config, f, indent=2)
+    print(f"Configurazione salvata in: {config_path}")
+
     datalooper, data_shape = get_datalooper(
         FLAGS.dataset, 
         FLAGS.batch_size, 
@@ -142,14 +159,20 @@ def train(argv):
         FLAGS.channel_mult,
         FLAGS.num_channel,
         device,
-        hrf=FLAGS.hrf,
+        model_type=FLAGS.model_type,
         latent_dim=FLAGS.latent_dim,
         use_scale_shift=FLAGS.use_scale_shift_norm,
         use_latent=FLAGS.variational, 
     ) # crea il modello UNet
 
     if FLAGS.variational:
-        vae = BetaVAE(latent_dim=FLAGS.latent_dim).to(device) # modello VAE per HRF
+        vae = BetaVAE(in_channels=data_shape[0], latent_dim=FLAGS.latent_dim).to(device) # modello VAE per HRF
+    
+    #Unet cat e 2unet sono i due modelli con HRF, baseline è un modello RF
+    if FLAGS.model_type in ["unet_cat_hrf", "2unet_hrf"]:
+        hrf = True
+    else:
+        hrf = False
     
     '''Calcolo del numero di parametri del modello per definire la complessità del modello'''
     model_size = 0
@@ -185,7 +208,8 @@ def train(argv):
         ckpt = torch.load(os.path.join(ckptdir, ckpt), weights_only=True) # carica i pesi
         load_model(unet, ckpt['model']) # del modello unet
         load_model(ema_model, ckpt['ema_model']) # del modello ema
-        load_model(vae, ckpt['vae']) # del modello vae
+        if FLAGS.variational:
+            load_model(vae, ckpt['vae']) # del modello vae (solo se variational)
         optim.load_state_dict(ckpt['optim']) # stato dell'ottimizzatore
         sched.load_state_dict(ckpt['sched']) # stato del scheduler
         cur_step = ckpt['step'] # ripristina lo step corrente
@@ -199,7 +223,7 @@ def train(argv):
             x1 = next(datalooper).to(device) 
             x0 = torch.randn_like(x1)
             t, xt, target = FM.sample_location_and_conditional_flow(x0, x1)
-            if FLAGS.hrf:
+            if hrf:
                 v0 = torch.randn_like(target)
                 tau, vtau, target = FM.sample_location_and_conditional_flow(v0, target)
                 # print(f'tau.shape: {tau.shape}, vtau.shape: {vtau.shape}, v0.shape: {v0.shape}, target.shape: {target.shape}')
@@ -209,7 +233,7 @@ def train(argv):
                 else:
                     pred = unet(tau, vtau, t, xt)
             else:
-                pred = unet(t, xt) 
+                pred = unet(t, xt) #RF
             if FLAGS.variational:
                 recon_loss = torch.mean((pred - target) ** 2)
                 kl_loss = _kl_divergence(mu, log_var).mean() # media del KL divergence su tutto il batch
@@ -237,23 +261,29 @@ def train(argv):
             
             # sample and Saving the weights
             if FLAGS.save_step > 0 and step % FLAGS.save_step == 0:
-                print(f"\ngenerating samples with {FLAGS.integration_method} method at step {step}...")
-                generate_samples(unet, imgdir, step, (16, *data_shape), device, net_="normal", integration_method=FLAGS.integration_method, hrf=FLAGS.hrf, latent_dim=FLAGS.latent_dim)
-                print(f"\ngenerating samples with {FLAGS.integration_method} method and EMA at step {step}...")
-                generate_samples(ema_model, imgdir, step, (16, *data_shape), device, net_="ema", integration_method=FLAGS.integration_method, hrf=FLAGS.hrf, latent_dim=FLAGS.latent_dim)
+                # print(f"\ngenerating samples with {FLAGS.integration_method} method at step {step}...")
+                # generate_samples(unet, imgdir, step, (16, *data_shape), device, net_="normal", integration_method=FLAGS.integration_method, hrf=hrf, latent_dim=FLAGS.latent_dim)
+                # print(f"\ngenerating samples with {FLAGS.integration_method} method and EMA at step {step}...")
+                # generate_samples(ema_model, imgdir, step, (16, *data_shape), device, net_="ema", integration_method=FLAGS.integration_method, hrf=hrf, latent_dim=FLAGS.latent_dim)
+                ckpt_data = {
+                    "model": unet.state_dict(),
+                    "ema_model": ema_model.state_dict(),
+                    "sched": sched.state_dict(),
+                    "optim": optim.state_dict(),
+                    "step": step,
+                }
+                if FLAGS.variational:
+                    ckpt_data["vae"] = vae.state_dict() # salva vae solo se variational
                 torch.save(
-                    {
-                        "model": unet.state_dict(),
-                        "ema_model": ema_model.state_dict(),
-                        "vae": vae.state_dict(),
-                        "sched": sched.state_dict(),
-                        "optim": optim.state_dict(),
-                        "step": step,
-                    },
-                    os.path.join(ckptdir, f"{FLAGS.exp_name}_{FLAGS.dataset}_weights_step_{step}.pt"),
+                    ckpt_data,
+                    os.path.join(ckptdir, f"{FLAGS.exp_name}_{FLAGS.model_type}_{FLAGS.dataset}_weights_step_{step}.pt"),
                 )
             if FLAGS.tb_step > 0 and step % FLAGS.tb_step == 0:
                 writer.add_scalar("training_loss", loss, step)
+                if FLAGS.variational:
+                    writer.add_scalar("kl_loss", kl_loss, step)
+                    writer.add_scalar("mu", mu.mean(), step)
+                    writer.add_scalar("log_var", log_var.mean(), step)
 
 
 if __name__ == "__main__":

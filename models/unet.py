@@ -87,11 +87,11 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlockWz):
     def forward(self, x, emb, z=None):
         for layer in self:
             if isinstance(layer, TimestepBlockWz):
-                print(f"{layer.__class__.__name__}")
+                # print(f"{layer.__class__.__name__}")
                 x = layer(x, emb, z)
             else:
                 if isinstance(x, tuple):
-                    print(f"{layer.__class__.__name__}")
+                    # print(f"{layer.__class__.__name__}")
                     x, _ = x
                 x = layer(x)
         return x
@@ -265,13 +265,13 @@ class ResBlock(TimestepBlockWz):
         emb_out = self.emb_layers(emb).type(h.dtype)
 
         if self.use_latent and z is not None:
-            print("Z DISPONIBILE&UTILIZZATA")
+            # print("Z DISPONIBILE&UTILIZZATA")
             emb_z = self.emb_layers_z(z)
         elif self.use_latent and z is None:
-            print("Z NON DISPOSIBILE")
+            # print("Z NON DISPOSIBILE")
             emb_z = None
         elif not self.use_latent:
-            print("Z DISPONIBILE/NON UTILIZZATA")
+            # print("Z DISPONIBILE/NON UTILIZZATA")
             emb_z = None
 
         while len(emb_out.shape) < len(h.shape):
@@ -361,14 +361,14 @@ class AttentionBlock(TimestepBlockWz):
 
         '''Innesto z: aggiunge un context token alla sequenza spaziale'''
         if self.use_latent and z is not None:
-            print("Z DISPONIBILE&UTILIZZATA IN ATTENTION")
+            # print("Z DISPONIBILE&UTILIZZATA IN ATTENTION")
             # Proietta z: [B, latent_dim] -> [B, C] -> [B, C, 1]
             z_token = self.z_proj(z).unsqueeze(-1)          # [B, C, 1]
             z_token = self.z_norm(z_token)                  # normalizza come gli altri token
             # Concatena il token z alla sequenza: [B, C, HW+1]
             x_with_z = th.cat([x, z_token], dim=-1)
         else:
-            print("Z NON UTILIZZATA IN ATTENTION")
+            # print("Z NON UTILIZZATA IN ATTENTION")
             x_with_z = x
         '''---------------------------------------------------'''
 
@@ -726,7 +726,7 @@ class UNetModel(nn.Module):
             self.num_classes is not None
         ), "must specify y if and only if the model is class-conditional"
         while timesteps.dim() > 1:
-            print(timesteps.shape)
+            # print(timesteps.shape)
             timesteps = timesteps[:, 0]
         if timesteps.dim() == 0:
             timesteps = timesteps.repeat(x.shape[0])

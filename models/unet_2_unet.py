@@ -166,13 +166,13 @@ class ResBlock_v(TimestepBlockWz):
         emb_out_t = self.emb_layers_x(emb_t).type(h.dtype)
 
         if self.use_latent and z is not None:
-            print("Z DISPONIBILE&UTILIZZATA")
+            # print("Z DISPONIBILE&UTILIZZATA")
             emb_z = self.emb_layers_z(z)
         elif self.use_latent and z is None:
-            print("Z NON DISPOSIBILE")
+            # print("Z NON DISPOSIBILE")
             emb_z = None
         elif not self.use_latent:
-            print("Z DISPONIBILE/NON UTILIZZATA")
+            # print("Z DISPONIBILE/NON UTILIZZATA")
             emb_z = None
                 
         #Aggiunge dimensioni (None) agli embedding finché non hanno lo stesso numero di dimensioni della feature map h

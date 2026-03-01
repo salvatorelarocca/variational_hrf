@@ -1,39 +1,39 @@
+import json
 import os
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from absl import app, flags
 from torchvision.utils import save_image
 
 from dataset import get_datalooper
-from model import get_model
+from choose_model import get_model
 from utils import sample_rf, sample_hrf, load_model
-from vae.vae_model import BetaVAE
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_string("output_dir", "./", help="output_directory")
+flags.DEFINE_string("output_dir", "./", help="output directory (stesso usato in train.py)")
 flags.DEFINE_string("imagenet_root", "./", help="root directory for imagenet")
-flags.DEFINE_string("exp_name", "exp", help="experiment name")
-flags.DEFINE_enum("dataset", "cifar10", ["cifar10", "mnist", "imagenet32"], help="dataset name")
-flags.DEFINE_string("model", "for_cifar10mini", help="Choose the model...")
-flags.DEFINE_bool("hrf", False, help="train hrf or baseline")
-flags.DEFINE_integer("gpu", 0, help="GPU number")
-flags.DEFINE_bool("variational", False, help="use variational autoencoder for HRF")
-
-# UNet
-flags.DEFINE_integer("num_channel", 128, help="base channel of UNet")
-flags.DEFINE_list("channel_mult", [1, 2, 2, 2], help="channel_mult of UNet")
-
-# Sample
-flags.DEFINE_enum("integration_method", "euler", ["euler", "dopri5"], help="integration method to use")
+flags.DEFINE_string("exp_name", "exp", help="nome esperimento (stesso usato in train.py)")
+flags.DEFINE_integer("gpu", -1, help="GPU number, -1 per CPU")
+flags.DEFINE_enum("integration_method", "euler", ["euler", "dopri5"], help="integration method")
+flags.DEFINE_integer("num_samples", 16, help="numero di immagini da generare")
 
 
-def preprocess_images(images):
-    images_resized = F.interpolate(images, size=(299, 299), mode='bilinear', align_corners=False)
-    images_resized = (images_resized.clamp(-1, 1) + 1) / 2
-    return images_resized
+def find_savedir(output_dir, exp_name):
+    """Trova la cartella dell'esperimento scansionando results_* senza richiedere --dataset."""
+    if not os.path.isdir(output_dir):
+        raise FileNotFoundError(f"output_dir '{output_dir}' non esiste.")
+    for entry in os.listdir(output_dir):
+        if not entry.startswith("results_"):
+            continue
+        candidate = os.path.join(output_dir, entry, exp_name)
+        if os.path.isfile(os.path.join(candidate, "config.json")):
+            return candidate
+    raise FileNotFoundError(
+        f"Nessun config.json trovato per exp_name='{exp_name}' in '{output_dir}'.\n"
+        f"Assicurati che --output_dir e --exp_name corrispondano a quelli usati in train.py."
+    )
 
 
 def eval(argv):
@@ -46,71 +46,88 @@ def eval(argv):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-    if FLAGS.gpu is not None and FLAGS.gpu >= 0 and torch.cuda.is_available():
-        device = torch.device(f"cuda:{FLAGS.gpu}")
-    else:
-        device = torch.device("cpu")
-    
-    savedir = os.path.join(FLAGS.output_dir, f"results_{FLAGS.model}", f"{FLAGS.exp_name}")
+    device = torch.device(f"cuda:{FLAGS.gpu}") if (
+        FLAGS.gpu >= 0 and torch.cuda.is_available()
+    ) else torch.device("cpu")
+
+    # Trova automaticamente la cartella dell'esperimento — non serve --dataset
+    savedir = find_savedir(FLAGS.output_dir, FLAGS.exp_name)
     ckptdir = os.path.join(savedir, "ckpt")
-    imgdir = os.path.join(savedir, "img_eval")
+    imgdir  = os.path.join(savedir, "img_eval")
     os.makedirs(imgdir, exist_ok=True)
 
+    # Legge la configurazione strutturale salvata una volta sola all'avvio del training
+    with open(os.path.join(savedir, "config.json")) as f:
+        cfg = json.load(f)
+    print("Configurazione letta da config.json:")
+    for k, v in cfg.items():
+        print(f"  {k}: {v}")
+
     _, data_shape = get_datalooper(
-        FLAGS.dataset, 
-        batch_size=1, 
-        num_workers=0, 
-        train=False, 
+        cfg["dataset"],
+        batch_size=1,
+        num_workers=0,
+        train=False,
         imagenet_root=FLAGS.imagenet_root,
     )
 
+    hrf = cfg["model_type"] in ["unet_cat_hrf", "2unet_hrf"]
+
+    # Ricostruisce il modello con la stessa architettura del training
+    unet = get_model(
+        cfg["dataset"],
+        data_shape,
+        cfg["channel_mult"],
+        cfg["num_channel"],
+        device,
+        model_type=cfg["model_type"],
+        latent_dim=cfg["latent_dim"],
+        use_latent=cfg["variational"],
+        use_scale_shift=cfg["use_scale_shift_norm"],
+    )
+
+    model_size = sum(p.data.nelement() for p in unet.parameters())
+    print(f"Parametri modello: {model_size} ({model_size/1e6:.2f} M)")
+
+    # Carica l'ultimo checkpoint disponibile
+    ckpt_file = sorted(
+        os.listdir(ckptdir),
+        key=lambda x: int(x.split('_')[-1].split('.')[0])
+    )[-1]
+    print(f"Caricamento checkpoint: {ckpt_file}")
+    ckpt = torch.load(os.path.join(ckptdir, ckpt_file), weights_only=True)
+    load_model(unet, ckpt['ema_model'])
+    unet.eval()
+
+    sample_shape = (FLAGS.num_samples, *data_shape)
+
     with torch.no_grad():
-        unet = get_model(
-            FLAGS.model,
-            data_shape,
-            FLAGS.channel_mult,
-            FLAGS.num_channel,
-            device,
-            hrf=FLAGS.hrf,
-        )
-        
-        model_size = 0
-        print("Loading UNet model...")
-        for param in unet.parameters():
-            model_size += param.data.nelement()
-        print(f"Model params number: {model_size}")
-        print("Model params: %.2f M" % (model_size / 1000 / 1000))
-
-        # Load Unet the model
-        ckpt = sorted(os.listdir(ckptdir), key=lambda x: int(x.split('_')[-1].split('.')[0]))[-1]
-        print(f"loading {ckpt}")
-        ckpt = torch.load(os.path.join(ckptdir, ckpt), weights_only=True)
-        load_model(unet, ckpt['ema_model'])
-        unet.eval()
-
-        # Load VAe model
-        if FLAGS.variational:
-            with torch.no_grad():
-                vae = BetaVAE(latent_dim=FLAGS.latent_dim).to(device)
-                load_model(vae, ckpt['vae'])
-                vae.eval()
-                vae_size = 0
-            for param in vae.parameters():
-                vae_size += param.data.nelement()
-            print("Loading VAE model...")
-            print(f"VAE params number: {vae_size}")
-            print("VAE params: %.2f M" % (vae_size / 1000 / 1000))
-
-        sample_shape = (16, *data_shape)
-        if FLAGS.hrf:
-            print('Sampling with HRF model...')
-            generated_img, nfe = sample_hrf(unet, vae, sample_shape, 2, 100, device, FLAGS.integration_method)
-            file = f"hrf_{FLAGS.integration_method}_{nfe}.png"
+        if hrf:
+            print(f"Sampling HRF ({cfg['model_type']}), metodo: {FLAGS.integration_method}...")
+            generated_img, nfe = sample_hrf(
+                unet,
+                sample_shape,
+                N=2,
+                M=100,
+                device=device,
+                integration_method=FLAGS.integration_method,
+                latent_dim=cfg["latent_dim"],
+            )
+            file = f"hrf_{cfg['model_type']}_{FLAGS.integration_method}_nfe{nfe}.png"
         else:
-            print('Sampling with RF model...')
-            generated_img, nfe = sample_rf(unet, sample_shape, 100, device, FLAGS.integration_method)
-            file = f"rf_{FLAGS.integration_method}_{nfe}.png"
-        save_image(generated_img.clip(-1, 1) / 2 + 0.5, os.path.join(imgdir, file), nrow=4)
+            print(f"Sampling RF baseline, metodo: {FLAGS.integration_method}...")
+            generated_img, nfe = sample_rf(
+                unet,
+                sample_shape,
+                nfe=100,
+                device=device,
+                integration_method=FLAGS.integration_method,
+            )
+            file = f"rf_{FLAGS.integration_method}_nfe{nfe}.png"
+
+    out_path = os.path.join(imgdir, file)
+    save_image(generated_img.clip(-1, 1) / 2 + 0.5, out_path, nrow=4)
+    print(f"Salvate {FLAGS.num_samples} immagini -> {out_path}  (NFE={nfe})")
 
 
 if __name__ == "__main__":

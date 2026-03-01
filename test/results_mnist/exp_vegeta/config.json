@@ -1,0 +1,11 @@
+{
+  "dataset": "mnist",
+  "model_type": "unet_cat_hrf",
+  "num_channel": 128,
+  "channel_mult": [
+    1
+  ],
+  "latent_dim": 128,
+  "variational": true,
+  "use_scale_shift_norm": false
+}
