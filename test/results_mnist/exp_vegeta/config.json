@@ -5,7 +5,7 @@
   "channel_mult": [
     1
   ],
-  "latent_dim": 128,
+  "latent_dim": 64,
   "variational": true,
   "use_scale_shift_norm": false,
   "beta": 0.5,

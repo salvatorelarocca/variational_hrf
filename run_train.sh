@@ -9,10 +9,10 @@ python train.py \
     --dataset='mnist' \
     --model_type='unet_cat_hrf' \
     --variational=True \
-    --latent_dim=128 \
-    --beta=0.5 \
-    --kl_warmup_frac=0.2 \
-    --free_bits=0.5 \
+    --latent_dim=64 \
+    --beta=1.0 \
+    --kl_warmup_frac=0.3 \
+    --free_bits=1.0 \
     --integration_method="euler" \
     --gpu=-1 \
     --num_channel=128 \
@@ -23,7 +23,7 @@ python train.py \
     --ot_bs=16 \
     --num_workers=0 \
     --ema_decay=0.99 \
-    --continue_train=True \
+    --continue_train=False \
     --save_step=9 \
     --tb_step=1 \
     --use_scale_shift_norm=False \
