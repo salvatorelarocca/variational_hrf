@@ -3,21 +3,18 @@ import os
 import json
 
 import torch
-from absl import app, flags # per la gestione delle flags da linea di comando pacchetto absl-py
-from torch.utils import tensorboard # per la scrittura su tensorboard
+from absl import app, flags
+from torch.utils import tensorboard
 from tqdm import trange
 from vae.vae_model import BetaVAE
 
-
 from dataset import get_datalooper
 from choose_model import get_model
-
 from utils import ema, generate_samples, load_model
 from cfm import (
     ConditionalFlowMatcher,
-    ExactOptimalTransportConditionalFlowMatcher, #non usato 
+    ExactOptimalTransportConditionalFlowMatcher,
 )
-
 
 FLAGS = flags.FLAGS
 
@@ -27,101 +24,100 @@ flags.DEFINE_string("exp_name", "base", help="experiment name")
 flags.DEFINE_enum("dataset", "imagenet32", ["cifar10", "mnist", "imagenet32"], help="dataset name")
 flags.DEFINE_integer("gpu", 0, help="GPU number")
 flags.DEFINE_bool("use_scale_shift_norm", False, help="use scale shift norm")
-flags.DEFINE_enum("integration_method", "euler", ["euler", "dopri5"], help="integration method for sampling") # metodo di integrazione per il campionamento, euler o dopri5
+flags.DEFINE_enum("integration_method", "euler", ["euler", "dopri5"], help="integration method for sampling")
 
 # Variational HRF
 flags.DEFINE_bool("variational", False, help="train variational hrf or deterministic hrf")
 flags.DEFINE_integer("latent_dim", 128, help="dimension of the latent space for the VAE in variational HRF")
-flags.DEFINE_float("beta", 1.0, help="weight of the KL divergence loss in the VAE objective for variational HRF")
+flags.DEFINE_float("beta", 1.0, help="valore massimo del peso KL (raggiunto dopo l'annealing)")
+flags.DEFINE_float("kl_warmup_frac", 0.3, help="frazione dell'orizzonte totale su cui beta cresce da 0 a beta_max")
+flags.DEFINE_float("free_bits", 1.0, help="soglia KL minima in nats sotto cui non viene penalizzato (0.0 per disabilitare)")
 
 # UNet
-flags.DEFINE_integer("num_channel", 128, help="base channel of UNet, 3 channels RGB became 128 channels in the first layer of UNet")
+flags.DEFINE_integer("num_channel", 128, help="base channel of UNet")
 flags.DEFINE_list("channel_mult", [1, 2, 2, 2], help="channel_mult of UNet")
-flags.DEFINE_enum("model_type", "baseline", ["baseline", "unet_cat_hrf", "2unet_hrf"], help="architecture Unet to use, for baseline set variational to False")
+flags.DEFINE_enum("model_type", "baseline", ["baseline", "unet_cat_hrf", "2unet_hrf"], help="architecture Unet to use")
 
 # Training
-flags.DEFINE_float("lr", 2e-4, help="target learning rate")  # TRY 2e-4
-flags.DEFINE_float("grad_clip", 1.0, help="gradient norm clipping") 
-'''
-non guarda le epoche ma i passi, quindi con un batch size 128 su cifar10 
-che ha circa 50k immagini abbiamo circa 390 passi per epoca ad arrivare
-a 400k passi facciamo circa 1025 epoche
-'''
-flags.DEFINE_integer(
-    "total_steps", 400_001, help="total training steps"
-)  # Lipman et al uses 400k but double batch size
-'''
-numero di step durante i quali il lr aumenta linearmente
-dalla condizione iniziale al valore target
-'''
-flags.DEFINE_integer("warmup", 5000, help="learning rate warmup") 
-flags.DEFINE_integer("batch_size", 128, help="batch size")  # Lipman et al uses 128
-'''
-probabilmente utilizzato per calcolare il costo di optimal transport
-la flag permette di settare la dimensione del batch su cui calcolare il costo
-'''
+flags.DEFINE_float("lr", 2e-4, help="target learning rate")
+flags.DEFINE_float("grad_clip", 1.0, help="gradient norm clipping")
+flags.DEFINE_integer("total_steps", 400_001, help="total training steps")
+flags.DEFINE_integer("warmup", 5000, help="learning rate warmup steps")
+flags.DEFINE_integer("batch_size", 128, help="batch size")
 flags.DEFINE_integer("ot_bs", 128, help="optimal transport batch size")
-
 flags.DEFINE_integer("num_workers", 4, help="workers of Dataloader")
-'''
-dacay per l'ema (exponential moving average) del modello
-'''
 flags.DEFINE_float("ema_decay", 0.9999, help="ema decay rate")
-'''
-permette di riprendere da un checkpoint precedente e di non partire da zero
-'''
-flags.DEFINE_bool("continue_train", False, help="continue training")
+flags.DEFINE_bool("continue_train", False, help="continue training from last checkpoint")
 
 # Evaluation
-flags.DEFINE_integer(
-    "save_step",
-    20000,
-    help="frequency of saving checkpoints, 0 to disable during training",
-)
+flags.DEFINE_integer("save_step", 20000, help="frequency of saving checkpoints, 0 to disable")
+flags.DEFINE_integer("tb_step", 50, help="frequency of saving to tensorboard")
 
-flags.DEFINE_integer(
-    "tb_step",
-    50,
-    help="frequency of saving loss to tensorboard",
-)
 
 def warmup_lr(step):
     return min(step, FLAGS.warmup) / FLAGS.warmup
 
+
 def _kl_divergence(mu, log_var):
+    # Restituisce KL per elemento del batch [B], non ancora mediata
     # log_var = log(sigma^2)
     return 0.5 * torch.sum(
-        mu.pow(2) + log_var.exp() - log_var - 1, # Sum(mu^2 + sigma^2 - log(sigma^2) - 1) per ogni dimensione latente
+        mu.pow(2) + log_var.exp() - log_var - 1,
         dim=1
     )
 
+
+def get_beta(step, total_end_step, beta_max, warmup_frac):
+    """KL annealing: beta cresce linearmente da 0 a beta_max.
+
+    Parametri:
+        step:          step corrente assoluto (es. 50000 se si riprende da checkpoint)
+        total_end_step: step finale assoluto = cur_step + FLAGS.total_steps
+        beta_max:      valore massimo di beta (FLAGS.beta)
+        warmup_frac:   frazione dell'orizzonte totale dedicata all'annealing
+
+    Usando l'orizzonte assoluto il comportamento è corretto sia per
+    training da zero che per ripresa da checkpoint:
+    - da zero:      step parte da 0, beta sale da 0 a beta_max
+    - da checkpoint: step parte già alto, beta è già a beta_max e rimane lì
+    """
+    warmup_steps = int(total_end_step * warmup_frac)
+    if warmup_steps == 0:
+        return beta_max
+    return beta_max * min(step / warmup_steps, 1.0)
+
+
+def kl_with_free_bits(kl_loss, free_bits):
+    """Free bits: non penalizza il KL finché è sotto free_bits nats.
+
+    Mantiene un livello minimo di informazione in z anche a regime,
+    prevenendo il collapse residuo dopo l'annealing.
+    Se free_bits=0.0 si comporta come il KL standard.
+    """
+    if free_bits <= 0.0:
+        return kl_loss
+    return torch.clamp(kl_loss, min=free_bits)
+
+
 def train(argv):
     print(
-        "lr, total_steps, ema decay, save_step, mix method, before middle block:",
-        FLAGS.lr,
-        FLAGS.total_steps,
-        FLAGS.ema_decay,
-        FLAGS.save_step,
-        FLAGS.tb_step,
+        "lr, total_steps, ema decay, save_step, tb_step:",
+        FLAGS.lr, FLAGS.total_steps, FLAGS.ema_decay, FLAGS.save_step, FLAGS.tb_step,
     )
 
-    '''Inizializzazioni per la riproducuibilità dei risultati'''
     seed = 0
-    torch.manual_seed(seed) # seed per la CPU
+    torch.manual_seed(seed)
     if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed) # seed per la singola GPU
-        torch.cuda.manual_seed_all(seed) # seed per tutte le GPU
-    '''alcune operazioni di cud nn non sono deterministiche per default
-    non solo benchmark disabilita la ricerca delle migliori configurazioni'''
-    torch.backends.cudnn.deterministic = True # rende le operazioni di cudnn deterministiche
-    torch.backends.cudnn.benchmark = False # disabilita la ricerca automatica delle migliori configurazioni di cudnn
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
     if FLAGS.gpu is not None and FLAGS.gpu >= 0 and torch.cuda.is_available():
         device = torch.device(f"cuda:{FLAGS.gpu}")
     else:
         device = torch.device("cpu")
 
-    '''Creazione delle cartelle per il salvataggio dei risultati'''
     savedir = os.path.join(FLAGS.output_dir, f"results_{FLAGS.dataset}", f"{FLAGS.exp_name}")
     os.makedirs(savedir, exist_ok=True)
     ckptdir = os.path.join(savedir, "ckpt")
@@ -130,7 +126,8 @@ def train(argv):
     os.makedirs(imgdir, exist_ok=True)
     writer = tensorboard.SummaryWriter(savedir)
 
-    '''Salvataggio della configurazione dell'esperimento in file json'''
+    # Salva la configurazione strutturale una volta sola prima del loop.
+    # I parametri architetturali non cambiano durante il training.
     model_config = {
         "dataset":              FLAGS.dataset,
         "model_type":           FLAGS.model_type,
@@ -139,6 +136,9 @@ def train(argv):
         "latent_dim":           FLAGS.latent_dim,
         "variational":          FLAGS.variational,
         "use_scale_shift_norm": FLAGS.use_scale_shift_norm,
+        "beta":                 FLAGS.beta,
+        "kl_warmup_frac":       FLAGS.kl_warmup_frac,
+        "free_bits":            FLAGS.free_bits,
     }
     config_path = os.path.join(savedir, "config.json")
     with open(config_path, "w") as f:
@@ -146,12 +146,12 @@ def train(argv):
     print(f"Configurazione salvata in: {config_path}")
 
     datalooper, data_shape = get_datalooper(
-        FLAGS.dataset, 
-        FLAGS.batch_size, 
-        FLAGS.num_workers, 
-        train=True, 
+        FLAGS.dataset,
+        FLAGS.batch_size,
+        FLAGS.num_workers,
+        train=True,
         imagenet_root=FLAGS.imagenet_root,
-    ) # riceve il dataloader infinito e la shape dei dati 
+    )
 
     unet = get_model(
         FLAGS.dataset,
@@ -162,128 +162,125 @@ def train(argv):
         model_type=FLAGS.model_type,
         latent_dim=FLAGS.latent_dim,
         use_scale_shift=FLAGS.use_scale_shift_norm,
-        use_latent=FLAGS.variational, 
-    ) # crea il modello UNet
+        use_latent=FLAGS.variational,
+    )
 
     if FLAGS.variational:
-        vae = BetaVAE(in_channels=data_shape[0], latent_dim=FLAGS.latent_dim).to(device) # modello VAE per HRF
-    
-    #Unet cat e 2unet sono i due modelli con HRF, baseline è un modello RF
-    if FLAGS.model_type in ["unet_cat_hrf", "2unet_hrf"]:
-        hrf = True
-    else:
-        hrf = False
-    
-    '''Calcolo del numero di parametri del modello per definire la complessità del modello'''
-    model_size = 0
-    for param in unet.parameters():
-        model_size += param.data.nelement()
-    print(f"Model params number: {model_size}")
-    print("Model params: %.2f M" % (model_size / 1000 / 1000))
+        vae = BetaVAE(in_channels=data_shape[0], latent_dim=FLAGS.latent_dim).to(device)
 
-    ema_model = copy.deepcopy(unet) # copia del modello per ema
+    hrf = FLAGS.model_type in ["unet_cat_hrf", "2unet_hrf"]
+
+    model_size = sum(p.data.nelement() for p in unet.parameters())
+    print(f"Model params: {model_size} ({model_size/1e6:.2f} M)")
+
+    ema_model = copy.deepcopy(unet)
+
     if FLAGS.variational:
-        vae_size = 0
-        for param in vae.parameters():
-            vae_size += param.data.nelement()
-        print(f"VAE params number: {vae_size}")
-        print("VAE params: %.2f M" % (vae_size / 1000 / 1000))
-        optim = torch.optim.Adam(list(unet.parameters()) + list(vae.parameters()), lr=FLAGS.lr) # ottimizzatore unet + vae
+        vae_size = sum(p.data.nelement() for p in vae.parameters())
+        print(f"VAE params: {vae_size} ({vae_size/1e6:.2f} M)")
+        optim = torch.optim.Adam(list(unet.parameters()) + list(vae.parameters()), lr=FLAGS.lr)
     else:
-        optim = torch.optim.Adam(unet.parameters(), lr=FLAGS.lr) # ottimizzatore Adam solo unet
-    sched = torch.optim.lr_scheduler.LambdaLR(optim, lr_lambda=warmup_lr) # permette di variare il learning rate durante l'addestramento
+        optim = torch.optim.Adam(unet.parameters(), lr=FLAGS.lr)
 
-    # continue training
-    '''Caricamento del checkpoint se esiste e se la flag è settata:
-    Ordina i file dei checkpoint per numero di step.
-    Il nome dei checkpoint ha la seguente struttura: "exp_dataset_weights_step_20000.pt".
-    x.split('_')[-1] prende "20000.pt" .split('.')[0] prende "20000" e int() lo converte in numero.
-    sorted(...)[-1] prende l’ultimo checkpoint, cioè l’ultimo step salvato.
-    '''
+    sched = torch.optim.lr_scheduler.LambdaLR(optim, lr_lambda=warmup_lr)
+
     cur_step = 0
     ckpt_list = os.listdir(ckptdir)
     if FLAGS.continue_train and len(ckpt_list) > 0:
-        ckpt = sorted(ckpt_list, key=lambda x: int(x.split('_')[-1].split('.')[0]))[-1]
-        print(f"loading {ckpt}")
-        ckpt = torch.load(os.path.join(ckptdir, ckpt), weights_only=True) # carica i pesi
-        load_model(unet, ckpt['model']) # del modello unet
-        load_model(ema_model, ckpt['ema_model']) # del modello ema
+        ckpt_file = sorted(ckpt_list, key=lambda x: int(x.split('_')[-1].split('.')[0]))[-1]
+        print(f"Loading checkpoint: {ckpt_file}")
+        ckpt = torch.load(os.path.join(ckptdir, ckpt_file), weights_only=True)
+        load_model(unet, ckpt['model'])
+        load_model(ema_model, ckpt['ema_model'])
         if FLAGS.variational:
-            load_model(vae, ckpt['vae']) # del modello vae (solo se variational)
-        optim.load_state_dict(ckpt['optim']) # stato dell'ottimizzatore
-        sched.load_state_dict(ckpt['sched']) # stato del scheduler
-        cur_step = ckpt['step'] # ripristina lo step corrente
+            load_model(vae, ckpt['vae'])
+        optim.load_state_dict(ckpt['optim'])
+        sched.load_state_dict(ckpt['sched'])
+        cur_step = ckpt['step']
+
+    # Orizzonte assoluto finale: usato da get_beta per calcolare il warmup
+    # in modo corretto sia per training da zero che per ripresa da checkpoint.
+    total_end_step = cur_step + FLAGS.total_steps
 
     FM = ConditionalFlowMatcher(sigma=0.0)
-    # FM = ExactOptimalTransportConditionalFlowMatcher(sigma=0.0, ot_bs=FLAGS.ot_bs)
 
-    with trange(cur_step, cur_step + FLAGS.total_steps, dynamic_ncols=True) as pbar:
+    with trange(cur_step, total_end_step, dynamic_ncols=True) as pbar:
         for step in pbar:
             optim.zero_grad()
-            x1 = next(datalooper).to(device) 
+            x1 = next(datalooper).to(device)
             x0 = torch.randn_like(x1)
             t, xt, target = FM.sample_location_and_conditional_flow(x0, x1)
+
             if hrf:
                 v0 = torch.randn_like(target)
                 tau, vtau, target = FM.sample_location_and_conditional_flow(v0, target)
-                # print(f'tau.shape: {tau.shape}, vtau.shape: {vtau.shape}, v0.shape: {v0.shape}, target.shape: {target.shape}')
-                if FLAGS.variational: # get_latent z
-                    z, mu, log_var = vae(v0, target, vtau, tau) #get latent z di vae
-                    pred = unet(tau, vtau, t, xt, z=z) 
+                if FLAGS.variational:
+                    z, mu, log_var = vae(v0, target, vtau, tau)
+                    pred = unet(tau, vtau, t, xt, z=z)
                 else:
                     pred = unet(tau, vtau, t, xt)
             else:
-                pred = unet(t, xt) #RF
+                pred = unet(t, xt)
+
             if FLAGS.variational:
                 recon_loss = torch.mean((pred - target) ** 2)
-                kl_loss = _kl_divergence(mu, log_var).mean() # media del KL divergence su tutto il batch
-                loss = recon_loss + kl_loss * FLAGS.beta
+                kl_loss = _kl_divergence(mu, log_var).mean()
+                # get_beta usa l'orizzonte assoluto: corretto per training da zero
+                # e per ripresa da checkpoint (step già alto → beta già a beta_max)
+                beta = get_beta(step, total_end_step, FLAGS.beta, FLAGS.kl_warmup_frac)
+                # kl_loss_weighted: non penalizza sotto free_bits, poi scala con beta
+                kl_loss_weighted = kl_with_free_bits(kl_loss, FLAGS.free_bits)
+                loss = recon_loss + kl_loss_weighted * beta
             else:
                 loss = torch.mean((pred - target) ** 2)
+
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(unet.parameters(), FLAGS.grad_clip)  
+            torch.nn.utils.clip_grad_norm_(unet.parameters(), FLAGS.grad_clip)
             optim.step()
             sched.step()
             ema(unet, ema_model, FLAGS.ema_decay)
-            pbar.set_description("Train step: %d" % step)
+
+            pbar.set_description(f"step {step}")
             if FLAGS.variational:
                 pbar.set_postfix(
                     loss=f"{loss.item():.4f}",
-                    kl=f"{kl_loss.item():.4f}",
+                    recon=f"{recon_loss.item():.4f}",
+                    kl=f"{kl_loss.item():.4f}",   # kl reale, non clamped
+                    beta=f"{beta:.4f}",
                     mu=f"{mu.mean().item():.4f}",
-                    log_var=f"{log_var.mean().item():.4f}"
                 )
             else:
-                pbar.set_postfix(
-                    loss=f"{loss.item():.4f}"
-                )
-            
-            
-            # sample and Saving the weights
+                pbar.set_postfix(loss=f"{loss.item():.4f}")
+
             if FLAGS.save_step > 0 and step % FLAGS.save_step == 0:
-                # print(f"\ngenerating samples with {FLAGS.integration_method} method at step {step}...")
-                # generate_samples(unet, imgdir, step, (16, *data_shape), device, net_="normal", integration_method=FLAGS.integration_method, hrf=hrf, latent_dim=FLAGS.latent_dim)
-                # print(f"\ngenerating samples with {FLAGS.integration_method} method and EMA at step {step}...")
-                # generate_samples(ema_model, imgdir, step, (16, *data_shape), device, net_="ema", integration_method=FLAGS.integration_method, hrf=hrf, latent_dim=FLAGS.latent_dim)
+                generate_samples(unet, imgdir, step, (16, *data_shape), device,
+                                 net_="normal", integration_method=FLAGS.integration_method,
+                                 hrf=hrf, latent_dim=FLAGS.latent_dim)
+                generate_samples(ema_model, imgdir, step, (16, *data_shape), device,
+                                 net_="ema", integration_method=FLAGS.integration_method,
+                                 hrf=hrf, latent_dim=FLAGS.latent_dim)
                 ckpt_data = {
-                    "model": unet.state_dict(),
+                    "model":     unet.state_dict(),
                     "ema_model": ema_model.state_dict(),
-                    "sched": sched.state_dict(),
-                    "optim": optim.state_dict(),
-                    "step": step,
+                    "sched":     sched.state_dict(),
+                    "optim":     optim.state_dict(),
+                    "step":      step,
                 }
                 if FLAGS.variational:
-                    ckpt_data["vae"] = vae.state_dict() # salva vae solo se variational
+                    ckpt_data["vae"] = vae.state_dict()
                 torch.save(
                     ckpt_data,
                     os.path.join(ckptdir, f"{FLAGS.exp_name}_{FLAGS.model_type}_{FLAGS.dataset}_weights_step_{step}.pt"),
                 )
+
             if FLAGS.tb_step > 0 and step % FLAGS.tb_step == 0:
-                writer.add_scalar("training_loss", loss, step)
+                writer.add_scalar("loss/total", loss, step)
                 if FLAGS.variational:
-                    writer.add_scalar("kl_loss", kl_loss, step)
-                    writer.add_scalar("mu", mu.mean(), step)
-                    writer.add_scalar("log_var", log_var.mean(), step)
+                    writer.add_scalar("loss/recon", recon_loss, step)
+                    writer.add_scalar("loss/kl",    kl_loss,    step)  # reale, non clamped
+                    writer.add_scalar("loss/beta",  beta,       step)
+                    writer.add_scalar("vae/mu",     mu.mean(),  step)
+                    writer.add_scalar("vae/log_var",log_var.mean(), step)
 
 
 if __name__ == "__main__":

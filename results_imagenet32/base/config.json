@@ -1,0 +1,14 @@
+{
+  "dataset": "imagenet32",
+  "model_type": "baseline",
+  "num_channel": 128,
+  "channel_mult": [
+    1,
+    2,
+    2,
+    2
+  ],
+  "latent_dim": 128,
+  "variational": false,
+  "use_scale_shift_norm": false
+}

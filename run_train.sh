@@ -11,11 +11,13 @@ python train.py \
     --variational=True \
     --latent_dim=128 \
     --beta=0.5 \
+    --kl_warmup_frac=0.2 \
+    --free_bits=0.5 \
     --integration_method="euler" \
     --gpu=-1 \
     --num_channel=128 \
     --channel_mult=1 \
-    --total_steps=10 \
+    --total_steps=100 \
     --warmup=50 \
     --batch_size=16 \
     --ot_bs=16 \

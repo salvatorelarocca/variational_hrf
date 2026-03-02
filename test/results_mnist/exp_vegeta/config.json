@@ -7,5 +7,8 @@
   ],
   "latent_dim": 128,
   "variational": true,
-  "use_scale_shift_norm": false
+  "use_scale_shift_norm": false,
+  "beta": 0.5,
+  "kl_warmup_frac": 0.2,
+  "free_bits": 0.5
 }
