@@ -31,7 +31,7 @@ flags.DEFINE_bool("variational", False, help="train variational hrf or determini
 flags.DEFINE_integer("latent_dim", 128, help="dimension of the latent space for the VAE in variational HRF")
 flags.DEFINE_float("beta", 1.0, help="valore massimo del peso KL (raggiunto dopo l'annealing)")
 flags.DEFINE_float("kl_warmup_frac", 0.3, help="frazione dell'orizzonte totale su cui beta cresce da 0 a beta_max")
-flags.DEFINE_float("free_bits", 1.0, help="soglia KL minima in nats sotto cui non viene penalizzato (0.0 per disabilitare)")
+flags.DEFINE_float("free_bits", 1.0, help="soglia KL minima per dimensione in nats (0.0 per disabilitare)")
 
 # UNet
 flags.DEFINE_integer("num_channel", 128, help="base channel of UNet")
@@ -59,27 +59,26 @@ def warmup_lr(step):
 
 
 def _kl_divergence(mu, log_var):
-    # Restituisce KL per elemento del batch [B], non ancora mediata
-    # log_var = log(sigma^2)
-    return 0.5 * torch.sum(
-        mu.pow(2) + log_var.exp() - log_var - 1,
-        dim=1
-    )
+    """Calcola KL per ogni elemento del batch e ogni dimensione latente.
+    Ritorna [B, latent_dim] dopo viene data a free_bits per evitare il collapse parziale.
+    log_var = log(sigma^2)
+    """
+    return 0.5 * (mu.pow(2) + log_var.exp() - log_var - 1)
 
 
 def get_beta(step, total_end_step, beta_max, warmup_frac):
     """KL annealing: beta cresce linearmente da 0 a beta_max.
 
     Parametri:
-        step:          step corrente assoluto (es. 50000 se si riprende da checkpoint)
+        step:           step corrente assoluto
         total_end_step: step finale assoluto = cur_step + FLAGS.total_steps
-        beta_max:      valore massimo di beta (FLAGS.beta)
-        warmup_frac:   frazione dell'orizzonte totale dedicata all'annealing
+        beta_max:       valore massimo di beta (FLAGS.beta)
+        warmup_frac:    frazione dell'orizzonte totale dedicata all'annealing
 
     Usando l'orizzonte assoluto il comportamento è corretto sia per
     training da zero che per ripresa da checkpoint:
-    - da zero:      step parte da 0, beta sale da 0 a beta_max
-    - da checkpoint: step parte già alto, beta è già a beta_max e rimane lì
+    - da zero:        step parte da 0, beta sale da 0 a beta_max
+    - da checkpoint:  step parte già alto, beta è già a beta_max e rimane lì
     """
     warmup_steps = int(total_end_step * warmup_frac)
     if warmup_steps == 0:
@@ -87,16 +86,22 @@ def get_beta(step, total_end_step, beta_max, warmup_frac):
     return beta_max * min(step / warmup_steps, 1.0)
 
 
-def kl_with_free_bits(kl_loss, free_bits):
-    """Free bits: non penalizza il KL finché è sotto free_bits nats.
+def kl_with_free_bits(kl_per_dim, free_bits):
+    """Free bits applicato per dimensione latente, poi mediato su batch e dimensioni.
 
-    Mantiene un livello minimo di informazione in z anche a regime,
-    prevenendo il collapse residuo dopo l'annealing.
+    Parametri:
+        kl_per_dim: [B, latent_dim] — KL per ogni elemento del batch e ogni dimensione
+        free_bits:  soglia minima per dimensione in nats
+
+    Il clamp viene applicato PRIMA della media così ogni dimensione deve
+    contribuire almeno free_bits, indipendentemente dalle altre.
+    Questo impedisce che alcune dimensioni collassino a zero mentre
+    la media rimane alta grazie ad altre dimensioni attive.
     Se free_bits=0.0 si comporta come il KL standard.
     """
     if free_bits <= 0.0:
-        return kl_loss
-    return torch.clamp(kl_loss, min=free_bits)
+        return kl_per_dim.mean()
+    return torch.clamp(kl_per_dim, min=free_bits).mean()
 
 
 def train(argv):
@@ -202,6 +207,15 @@ def train(argv):
     # in modo corretto sia per training da zero che per ripresa da checkpoint.
     total_end_step = cur_step + FLAGS.total_steps
 
+    # Estrae le flag usate nel loop in variabili locali per leggibilità
+    variational    = FLAGS.variational
+    beta_max       = FLAGS.beta
+    kl_warmup_frac = FLAGS.kl_warmup_frac
+    free_bits      = FLAGS.free_bits
+    grad_clip      = FLAGS.grad_clip
+    save_step      = FLAGS.save_step
+    tb_step        = FLAGS.tb_step
+
     FM = ConditionalFlowMatcher(sigma=0.0)
 
     with trange(cur_step, total_end_step, dynamic_ncols=True) as pbar:
@@ -214,7 +228,7 @@ def train(argv):
             if hrf:
                 v0 = torch.randn_like(target)
                 tau, vtau, target = FM.sample_location_and_conditional_flow(v0, target)
-                if FLAGS.variational:
+                if variational:
                     z, mu, log_var = vae(v0, target, vtau, tau)
                     pred = unet(tau, vtau, t, xt, z=z)
                 else:
@@ -222,37 +236,38 @@ def train(argv):
             else:
                 pred = unet(t, xt)
 
-            if FLAGS.variational:
-                recon_loss = torch.mean((pred - target) ** 2)
-                kl_loss = _kl_divergence(mu, log_var).mean()
-                # get_beta usa l'orizzonte assoluto: corretto per training da zero
-                # e per ripresa da checkpoint (step già alto → beta già a beta_max)
-                beta = get_beta(step, total_end_step, FLAGS.beta, FLAGS.kl_warmup_frac)
-                # kl_loss_weighted: non penalizza sotto free_bits, poi scala con beta
-                kl_loss_weighted = kl_with_free_bits(kl_loss, FLAGS.free_bits)
-                loss = recon_loss + kl_loss_weighted * beta
+            if variational:
+                recon_loss  = torch.mean((pred - target) ** 2)
+                kl_per_dim  = _kl_divergence(mu, log_var)          # [B, latent_dim]
+                kl_loss     = kl_per_dim.mean()                     # scalare per logging
+                beta        = get_beta(step, total_end_step, beta_max, kl_warmup_frac)
+                # free bits applicato per dimensione prima della media:
+                # ogni dimensione latente deve contribuire almeno free_bits nats,
+                # impedendo il collapse parziale anche quando la media è alta
+                kl_weighted = kl_with_free_bits(kl_per_dim, free_bits)
+                loss        = recon_loss + kl_weighted * beta
             else:
                 loss = torch.mean((pred - target) ** 2)
 
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(unet.parameters(), FLAGS.grad_clip)
+            torch.nn.utils.clip_grad_norm_(unet.parameters(), grad_clip)
             optim.step()
             sched.step()
             ema(unet, ema_model, FLAGS.ema_decay)
 
             pbar.set_description(f"step {step}")
-            if FLAGS.variational:
+            if variational:
                 pbar.set_postfix(
                     loss=f"{loss.item():.4f}",
                     recon=f"{recon_loss.item():.4f}",
-                    kl=f"{kl_loss.item():.4f}",   # kl reale, non clamped
+                    kl=f"{kl_loss.item():.4f}",     # reale, non clamped
                     beta=f"{beta:.4f}",
                     mu=f"{mu.mean().item():.4f}",
                 )
             else:
                 pbar.set_postfix(loss=f"{loss.item():.4f}")
 
-            if FLAGS.save_step > 0 and step % FLAGS.save_step == 0:
+            if save_step > 0 and step % save_step == 0:
                 generate_samples(unet, imgdir, step, (16, *data_shape), device,
                                  net_="normal", integration_method=FLAGS.integration_method,
                                  hrf=hrf, latent_dim=FLAGS.latent_dim)
@@ -266,21 +281,21 @@ def train(argv):
                     "optim":     optim.state_dict(),
                     "step":      step,
                 }
-                if FLAGS.variational:
+                if variational:
                     ckpt_data["vae"] = vae.state_dict()
                 torch.save(
                     ckpt_data,
                     os.path.join(ckptdir, f"{FLAGS.exp_name}_{FLAGS.model_type}_{FLAGS.dataset}_weights_step_{step}.pt"),
                 )
 
-            if FLAGS.tb_step > 0 and step % FLAGS.tb_step == 0:
+            if tb_step > 0 and step % tb_step == 0:
                 writer.add_scalar("loss/total", loss, step)
-                if FLAGS.variational:
-                    writer.add_scalar("loss/recon", recon_loss, step)
-                    writer.add_scalar("loss/kl",    kl_loss,    step)  # reale, non clamped
-                    writer.add_scalar("loss/beta",  beta,       step)
-                    writer.add_scalar("vae/mu",     mu.mean(),  step)
-                    writer.add_scalar("vae/log_var",log_var.mean(), step)
+                if variational:
+                    writer.add_scalar("loss/recon",    recon_loss,      step)
+                    writer.add_scalar("loss/kl",       kl_loss,         step)  # reale, non clamped
+                    writer.add_scalar("loss/beta",     beta,            step)
+                    writer.add_scalar("vae/mu",        mu.mean(),       step)
+                    writer.add_scalar("vae/log_var",   log_var.mean(),  step)
 
 
 if __name__ == "__main__":
