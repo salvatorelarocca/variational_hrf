@@ -165,7 +165,7 @@ def generate_samples(model, savedir, step, shape, device, net_="normal", integra
     model_ = copy.deepcopy(model) # crea una copia del modello per il campionamento
 
     if hrf:
-        samples, _ = sample_hrf(model_, shape, 1, 10, device, integration_method=integration_method, latent_dim=latent_dim) # hrf + euler, t=1 e tau=100 di default a nfe 100
+        samples, _ = sample_hrf(model_, shape, 1, 100, device, integration_method=integration_method, latent_dim=latent_dim) # hrf + euler, t=1 e tau=100 di default a nfe 100
     else:
         samples, _ = sample_rf(model_, shape, 100, device) # rf + euler di default a nfe 100
     
