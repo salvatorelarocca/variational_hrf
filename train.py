@@ -1,6 +1,7 @@
 import copy
 import os
 import json
+from datetime import datetime
 
 import torch
 from absl import app, flags
@@ -25,6 +26,7 @@ flags.DEFINE_enum("dataset", "imagenet32", ["cifar10", "mnist", "imagenet32"], h
 flags.DEFINE_integer("gpu", 0, help="GPU number")
 flags.DEFINE_bool("use_scale_shift_norm", False, help="use scale shift norm")
 flags.DEFINE_enum("integration_method", "euler", ["euler", "dopri5"], help="integration method for sampling")
+flags.DEFINE_bool("generate_samples", True, help="whether to generate samples during training")
 
 # Variational HRF
 flags.DEFINE_bool("variational", False, help="train variational hrf or deterministic hrf")
@@ -71,14 +73,11 @@ def get_beta(step, total_end_step, beta_max, warmup_frac):
 
     Parametri:
         step:           step corrente assoluto
-        total_end_step: step finale assoluto = cur_step + FLAGS.total_steps
+        total_end_step: FLAGS.total_steps — orizzonte fisso, indipendente dal checkpoint
         beta_max:       valore massimo di beta (FLAGS.beta)
         warmup_frac:    frazione dell'orizzonte totale dedicata all'annealing
 
-    Usando l'orizzonte assoluto il comportamento è corretto sia per
-    training da zero che per ripresa da checkpoint:
-    - da zero:        step parte da 0, beta sale da 0 a beta_max
-    - da checkpoint:  step parte già alto, beta è già a beta_max e rimane lì
+    Se si riprende da un checkpoint con step > warmup_steps, beta è già a beta_max.
     """
     warmup_steps = int(total_end_step * warmup_frac)
     if warmup_steps == 0:
@@ -129,7 +128,7 @@ def train(argv):
     os.makedirs(ckptdir, exist_ok=True)
     imgdir = os.path.join(savedir, "img_train")
     os.makedirs(imgdir, exist_ok=True)
-    writer = tensorboard.SummaryWriter(savedir)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     # Salva la configurazione strutturale una volta sola prima del loop.
     # I parametri architetturali non cambiano durante il training.
@@ -201,11 +200,17 @@ def train(argv):
             load_model(vae, ckpt['vae'])
         optim.load_state_dict(ckpt['optim'])
         sched.load_state_dict(ckpt['sched'])
-        cur_step = ckpt['step']
+        cur_step = ckpt['step'] + 1
+    
+    writer = tensorboard.SummaryWriter(
+        savedir, 
+        purge_step=cur_step,
+        filename_suffix=f".{timestamp}"
+        )
 
     # Orizzonte assoluto finale: usato da get_beta per calcolare il warmup
     # in modo corretto sia per training da zero che per ripresa da checkpoint.
-    total_end_step = cur_step + FLAGS.total_steps
+    total_end_step = FLAGS.total_steps
 
     # Estrae le flag usate nel loop in variabili locali per leggibilità
     variational    = FLAGS.variational
@@ -218,7 +223,7 @@ def train(argv):
 
     FM = ConditionalFlowMatcher(sigma=0.0)
 
-    with trange(cur_step, total_end_step, dynamic_ncols=True) as pbar:
+    with trange(cur_step, total_end_step, dynamic_ncols=True, initial=cur_step, total=total_end_step) as pbar:
         for step in pbar:
             optim.zero_grad()
             x1 = next(datalooper).to(device)
@@ -267,13 +272,14 @@ def train(argv):
             else:
                 pbar.set_postfix(loss=f"{loss.item():.4f}")
 
-            if save_step > 0 and step % save_step == 0:
-                generate_samples(unet, imgdir, step, (16, *data_shape), device,
-                                 net_="normal", integration_method=FLAGS.integration_method,
-                                 hrf=hrf, latent_dim=FLAGS.latent_dim)
-                generate_samples(ema_model, imgdir, step, (16, *data_shape), device,
-                                 net_="ema", integration_method=FLAGS.integration_method,
-                                 hrf=hrf, latent_dim=FLAGS.latent_dim)
+            if save_step > 0 and step % save_step == 0 and step > 0:
+                if FLAGS.generate_samples:
+                    generate_samples(unet, imgdir, step, (16, *data_shape), device,
+                                    net_="normal", integration_method=FLAGS.integration_method,
+                                    hrf=hrf, latent_dim=FLAGS.latent_dim)
+                    generate_samples(ema_model, imgdir, step, (16, *data_shape), device,
+                                    net_="ema", integration_method=FLAGS.integration_method,
+                                    hrf=hrf, latent_dim=FLAGS.latent_dim)
                 ckpt_data = {
                     "model":     unet.state_dict(),
                     "ema_model": ema_model.state_dict(),
