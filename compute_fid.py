@@ -1,20 +1,33 @@
 """
-Calcola la FID al variare del numero di NFE e produce un grafico NFE vs FID.
+Calcola la FID al variare di N e M e produce un grafico NFE vs FID.
 
-Uso:
-    # Calcola FID per NFE specifici
-    python compute_fid.py --exp_name goku --output_dir ./test --nfe_list 10,50,100,200 --num_samples 10000 --gpu 0
+Per modelli HRF (unet_cat_hrf, 2unet_hrf):
+    NFE = N * M
+    Passa --N_list e --M_list con stessa cardinalità.
+    Ogni coppia (N[i], M[i]) è un punto del grafico.
 
-    # Rigenera le immagini anche se già presenti
-    python compute_fid.py --exp_name goku --output_dir ./test --nfe_list 10,50,100 --force_regenerate=True --gpu 0
+Per modelli baseline RF:
+    NFE = N (passi di integrazione diretti)
+    Passa solo --N_list. --M_list viene ignorato.
+
+Esempi:
+    # HRF
+    python compute_fid.py --exp_name goku --output_dir ./test \
+        --N_list 1,2,2,5 --M_list 10,25,50,20 \
+        --num_samples 10000 --gpu 0
+
+    # RF baseline (M_list non necessario)
+    python compute_fid.py --exp_name goku --output_dir ./test \
+        --N_list 10,50,100,200 \
+        --num_samples 10000 --gpu 0
 
 Output:
     {savedir}/fid/
-        nfe_10/         ← immagini generate con NFE=10
-        nfe_50/         ← immagini generate con NFE=50
+        real/               ← immagini reali (generate una volta sola)
+        N1_M10/             ← immagini generate con N=1, M=10  (NFE=10)
+        N2_M25/             ← immagini generate con N=2, M=25  (NFE=50)
         ...
-        real/           ← immagini reali (generate una volta sola)
-        fid_results.json    ← valori FID per ogni NFE
+        fid_results.json    ← valori FID per ogni coppia (N, M)
         fid_vs_nfe.png      ← grafico NFE vs FID
 """
 
@@ -41,10 +54,23 @@ flags.DEFINE_string("imagenet_root", "./", help="root directory per imagenet")
 flags.DEFINE_string("exp_name", "exp", help="nome esperimento (stesso di train.py)")
 flags.DEFINE_integer("gpu", 0, help="GPU number, -1 per CPU")
 flags.DEFINE_enum("integration_method", "euler", ["euler", "dopri5"], help="metodo di integrazione")
-flags.DEFINE_list("nfe_list", [10, 50, 100, 200, 500], help="lista di NFE da valutare")
 flags.DEFINE_integer("num_samples", 10000, help="numero immagini per calcolo FID (minimo consigliato: 10000)")
 flags.DEFINE_integer("batch_size", 128, help="batch size per la generazione")
 flags.DEFINE_bool("force_regenerate", False, help="rigenera le immagini anche se già presenti")
+flags.DEFINE_integer("num_workers", 0, help="worker per il DataLoader di clean-fid, 0 per disabilitare il multiprocessing")
+
+# N_list: cicli esterni HRF oppure NFE diretti per RF baseline
+flags.DEFINE_list("N_list", [1, 2, 5, 10], help=(
+    "Lista di valori N. "
+    "Per HRF: cicli esterni (NFE = N*M). "
+    "Per RF baseline: NFE diretto."
+))
+# M_list: cicli interni HRF, opzionale — ignorato per RF baseline
+flags.DEFINE_list("M_list", [], help=(
+    "Lista di valori M (cicli interni HRF). "
+    "Deve avere stessa cardinalità di N_list. "
+    "Non necessario per RF baseline — viene ignorato."
+))
 
 
 # ─────────────────────────────────────────────
@@ -67,6 +93,40 @@ def find_savedir(output_dir, exp_name):
     )
 
 
+def parse_nm_lists(N_list_raw, M_list_raw, hrf):
+    """
+    Valida e restituisce la lista di coppie (N, M) da valutare.
+
+    Per HRF:
+        - N_list e M_list devono avere stessa cardinalità
+        - Se M_list è vuota usa M=10 come default per tutti gli N
+    Per RF baseline:
+        - M_list viene ignorato completamente
+        - Restituisce coppie (N, None)
+    """
+    N_list = [int(x) for x in N_list_raw]
+
+    if not hrf:
+        # RF baseline: M non ha senso
+        if M_list_raw:
+            print("  Nota: --M_list ignorato per modello RF baseline.")
+        return [(n, None) for n in N_list]
+
+    # HRF: M_list necessaria
+    if not M_list_raw:
+        print("  Nota: --M_list non specificata per HRF, uso M=10 come default.")
+        M_list = [10] * len(N_list)
+    else:
+        M_list = [int(x) for x in M_list_raw]
+        if len(M_list) != len(N_list):
+            raise ValueError(
+                f"--N_list e --M_list devono avere stessa cardinalità. "
+                f"Ricevuti: N_list={len(N_list)}, M_list={len(M_list)}"
+            )
+
+    return list(zip(N_list, M_list))
+
+
 # ─────────────────────────────────────────────
 # Immagini reali
 # ─────────────────────────────────────────────
@@ -74,7 +134,7 @@ def find_savedir(output_dir, exp_name):
 def save_real_images(dataset_name, real_img_dir, num_samples):
     """
     Salva le immagini reali del dataset in PNG per clean-fid.
-    Viene eseguita una volta sola — se le immagini sono già presenti viene saltata.
+    Eseguita una volta sola — se le immagini sono già presenti viene saltata.
     MNIST viene convertito a 3 canali perché InceptionV3 richiede RGB.
     """
     os.makedirs(real_img_dir, exist_ok=True)
@@ -83,13 +143,12 @@ def save_real_images(dataset_name, real_img_dir, num_samples):
         print(f"  Immagini reali già presenti ({len(existing)}), salto.")
         return
 
-    print(f"  Salvataggio {num_samples} immagini reali in {real_img_dir}...")
+    print(f"  Salvataggio {num_samples} immagini reali...")
 
     if dataset_name == "mnist":
-        # Resize a 32x32 e converti a 3 canali per InceptionV3
         transform = transforms.Compose([
-            transforms.Resize(32),
-            transforms.Grayscale(3),
+            transforms.Resize(32),      # resize per InceptionV3
+            transforms.Grayscale(3),    # 1 canale → 3 canali
             transforms.ToTensor(),
             transforms.Normalize([0.5]*3, [0.5]*3),
         ])
@@ -104,7 +163,7 @@ def save_real_images(dataset_name, real_img_dir, num_samples):
 
     elif dataset_name == "imagenet32":
         raise NotImplementedError(
-            "Per ImageNet32 prepara le immagini reali manualmente nella cartella fid/real/."
+            "Per ImageNet32 prepara le immagini reali manualmente in fid/real/."
         )
     else:
         raise NotImplementedError(f"Dataset {dataset_name} non supportato.")
@@ -121,42 +180,29 @@ def save_real_images(dataset_name, real_img_dir, num_samples):
 # Generazione immagini
 # ─────────────────────────────────────────────
 
-def generate_images_for_nfe(unet, cfg, data_shape, gen_img_dir, nfe,
-                             device, batch_size, integration_method, num_samples):
+def generate_images(unet, cfg, data_shape, gen_img_dir, N, M,
+                    device, batch_size, integration_method, num_samples, hrf):
     """
-    Genera num_samples immagini con un dato NFE e le salva in gen_img_dir.
-    Se le immagini sono già presenti e force_regenerate=False, viene saltata.
+    Genera num_samples immagini con i parametri N, M specificati.
+    Se le immagini sono già presenti e force_regenerate=False viene saltata.
 
-    Per HRF:
-        NFE = N * M  (cicli esterni * cicli interni)
-        Usiamo N=2 fisso e M = NFE // N per mantenere lo stesso NFE nominale.
-        Se NFE < 2 usiamo N=1, M=NFE.
-
-    Per RF baseline:
-        NFE corrisponde direttamente al numero di passi di integrazione.
+    HRF:      usa sample_hrf con N cicli esterni e M cicli interni
+    Baseline: usa sample_rf con NFE = N passi di integrazione
     """
     os.makedirs(gen_img_dir, exist_ok=True)
     existing = [f for f in os.listdir(gen_img_dir) if f.endswith(".png")]
+    label = f"N={N}, M={M}" if hrf else f"NFE={N}"
+
     if len(existing) >= num_samples and not FLAGS.force_regenerate:
-        print(f"  NFE={nfe}: immagini già presenti ({len(existing)}), salto.")
+        print(f"  {label}: immagini già presenti ({len(existing)}), salto.")
         return
 
-    hrf = cfg["model_type"] in ["unet_cat_hrf", "2unet_hrf"]
     num_batches = (num_samples + batch_size - 1) // batch_size
     generated_count = 0
 
-    # Calcola N e M per HRF
-    if hrf:
-        N = 2 if nfe >= 2 else 1
-        M = max(1, nfe // N)
-        actual_nfe = N * M
-        print(f"  NFE={nfe} → N={N}, M={M} (NFE effettivo={actual_nfe})")
-    else:
-        print(f"  NFE={nfe}")
-
     unet.eval()
     with torch.no_grad():
-        for _ in trange(num_batches, desc=f"  Generazione NFE={nfe}", leave=False):
+        for _ in trange(num_batches, desc=f"  {label}", leave=False):
             current_batch = min(batch_size, num_samples - generated_count)
             if current_batch <= 0:
                 break
@@ -171,14 +217,15 @@ def generate_images_for_nfe(unet, cfg, data_shape, gen_img_dir, nfe,
                     latent_dim=cfg["latent_dim"],
                 )
             else:
+                # RF baseline: N è il numero di passi di integrazione (NFE)
                 imgs, _ = sample_rf(
                     unet, batch_shape,
-                    nfe=nfe,
+                    nfe=N,
                     device=device,
                     integration_method=integration_method,
                 )
 
-            imgs = imgs.clip(-1, 1) / 2 + 0.5  # rimappa in [0,1]
+            imgs = imgs.clip(-1, 1) / 2 + 0.5
 
             # MNIST: 1 canale → 3 canali per InceptionV3
             if imgs.shape[1] == 1:
@@ -188,35 +235,38 @@ def generate_images_for_nfe(unet, cfg, data_shape, gen_img_dir, nfe,
                 save_image(img, os.path.join(gen_img_dir, f"gen_{generated_count:06d}.png"))
                 generated_count += 1
 
-    print(f"  NFE={nfe}: generate {generated_count} immagini.")
+    print(f"  {label}: generate {generated_count} immagini.")
 
 
 # ─────────────────────────────────────────────
 # Grafico
 # ─────────────────────────────────────────────
 
-def plot_fid_vs_nfe(nfe_values, fid_values, save_path, exp_name, integration_method):
-    """Produce il grafico NFE (ascisse) vs FID (ordinate)."""
-    fig, ax = plt.subplots(figsize=(8, 5))
+def plot_fid_vs_nfe(nfe_values, fid_values, labels, save_path, exp_name, integration_method):
+    """
+    Grafico NFE (ascisse, scala log) vs FID (ordinate).
+    Ogni punto è annotato con la label (N=x, M=y) o NFE=x per il baseline.
+    """
+    fig, ax = plt.subplots(figsize=(9, 5))
 
-    ax.plot(nfe_values, fid_values, marker='o', linewidth=2, markersize=6, color='steelblue')
+    ax.plot(nfe_values, fid_values, marker='o', linewidth=2,
+            markersize=7, color='steelblue')
 
-    # Annota ogni punto con il valore FID
-    for nfe, fid_val in zip(nfe_values, fid_values):
+    for nfe, fid_val, label in zip(nfe_values, fid_values, labels):
         ax.annotate(
-            f"{fid_val:.1f}",
+            f"{label}\nFID={fid_val:.1f}",
             (nfe, fid_val),
             textcoords="offset points",
-            xytext=(0, 10),
+            xytext=(0, 12),
             ha='center',
-            fontsize=9,
+            fontsize=8,
         )
 
     ax.set_xlabel("NFE (Number of Function Evaluations)", fontsize=12)
     ax.set_ylabel("FID ↓", fontsize=12)
     ax.set_title(f"NFE vs FID — {exp_name} ({integration_method})", fontsize=13)
     ax.grid(True, linestyle='--', alpha=0.5)
-    ax.set_xscale('log')  # scala logaritmica sull'asse x per leggibilità
+    ax.set_xscale('log')
 
     plt.tight_layout()
     plt.savefig(save_path, dpi=150)
@@ -234,11 +284,6 @@ def main(argv):
     ) else torch.device("cpu")
     print(f"Device: {device}")
 
-    # Parsing nfe_list (absl restituisce liste di stringhe)
-    nfe_list = sorted([int(x) for x in FLAGS.nfe_list])
-    print(f"NFE da valutare: {nfe_list}")
-    print(f"Immagini per NFE: {FLAGS.num_samples}")
-
     # Trova cartella esperimento e legge config
     savedir = find_savedir(FLAGS.output_dir, FLAGS.exp_name)
     with open(os.path.join(savedir, "config.json")) as f:
@@ -246,6 +291,13 @@ def main(argv):
     print("\nConfigurazione:")
     for k, v in cfg.items():
         print(f"  {k}: {v}")
+
+    hrf = cfg["model_type"] in ["unet_cat_hrf", "2unet_hrf"]
+
+    # Valida e costruisce lista coppie (N, M)
+    nm_pairs = parse_nm_lists(FLAGS.N_list, FLAGS.M_list, hrf)
+    print(f"\nCoppie (N, M) da valutare: {nm_pairs}")
+    print(f"Immagini per punto: {FLAGS.num_samples}")
 
     fid_dir      = os.path.join(savedir, "fid")
     real_img_dir = os.path.join(fid_dir, "real")
@@ -257,18 +309,18 @@ def main(argv):
         train=False, imagenet_root=FLAGS.imagenet_root,
     )
 
-    # Salva immagini reali (una volta sola)
+    # ── 1. Immagini reali (una volta sola) ──
     print("\n[1/3] Immagini reali")
     save_real_images(cfg["dataset"], real_img_dir, FLAGS.num_samples)
 
-    # Carica modello dal checkpoint più recente
+    # ── 2. Carica modello ──
     print("\n[2/3] Caricamento modello")
     unet = get_model(
         cfg["dataset"], data_shape, cfg["channel_mult"], cfg["num_channel"], device,
         model_type=cfg["model_type"], latent_dim=cfg["latent_dim"],
         use_latent=cfg["variational"], use_scale_shift=cfg["use_scale_shift_norm"],
     )
-    ckptdir  = os.path.join(savedir, "ckpt")
+    ckptdir   = os.path.join(savedir, "ckpt")
     ckpt_file = sorted(
         os.listdir(ckptdir),
         key=lambda x: int(x.split('_')[-1].split('.')[0])
@@ -278,25 +330,36 @@ def main(argv):
     load_model(unet, ckpt['ema_model'])
     unet.eval()
 
-    # Loop su ogni NFE: genera immagini e calcola FID
+    # ── 3. Genera immagini e calcola FID per ogni coppia (N, M) ──
     print("\n[3/3] Generazione e calcolo FID")
-    results = {}  # {nfe: fid_score}
+    results  = []   # lista di dict {N, M, nfe, fid}
+    nfe_list = []   # per il grafico
+    fid_list = []
+    label_list = []
 
-    for nfe in nfe_list:
-        print(f"\n── NFE = {nfe} ──")
-        gen_img_dir = os.path.join(fid_dir, f"nfe_{nfe}")
+    for N, M in nm_pairs:
+        nfe   = N * M if hrf else N
+        label = f"N={N},M={M}" if hrf else f"NFE={N}"
+        print(f"\n── {label} (NFE={nfe}) ──")
 
-        # Genera immagini
-        generate_images_for_nfe(
-            unet, cfg, data_shape, gen_img_dir, nfe,
-            device, FLAGS.batch_size, FLAGS.integration_method, FLAGS.num_samples,
+        # Cartella dedicata per questa coppia
+        folder_name = f"N{N}_M{M}" if hrf else f"NFE{N}"
+        gen_img_dir = os.path.join(fid_dir, folder_name)
+
+        generate_images(
+            unet, cfg, data_shape, gen_img_dir, N, M,
+            device, FLAGS.batch_size, FLAGS.integration_method,
+            FLAGS.num_samples, hrf,
         )
 
-        # Calcola FID
         print(f"  Calcolo FID...")
-        fid_score = fid.compute_fid(real_img_dir, gen_img_dir, device=device)
-        results[nfe] = fid_score
-        print(f"  FID (NFE={nfe}): {fid_score:.4f}")
+        fid_score = fid.compute_fid(real_img_dir, gen_img_dir, device=device, num_workers=FLAGS.num_workers)
+        print(f"  FID = {fid_score:.4f}")
+
+        results.append({"N": N, "M": M, "nfe": nfe, "fid": fid_score})
+        nfe_list.append(nfe)
+        fid_list.append(fid_score)
+        label_list.append(label)
 
     # Salva risultati JSON
     results_path = os.path.join(fid_dir, "fid_results.json")
@@ -306,23 +369,31 @@ def main(argv):
             "checkpoint":         ckpt_file,
             "num_samples":        FLAGS.num_samples,
             "integration_method": FLAGS.integration_method,
+            "hrf":                hrf,
             "results":            results,
         }, f, indent=2)
     print(f"\nRisultati salvati in: {results_path}")
 
-    # Stampa tabella riassuntiva
-    print("\n" + "="*35)
-    print(f"{'NFE':>8}  {'FID':>10}")
-    print("-"*35)
-    for nfe in nfe_list:
-        print(f"{nfe:>8}  {results[nfe]:>10.4f}")
-    print("="*35)
+    # Tabella riassuntiva
+    print("\n" + "="*45)
+    if hrf:
+        print(f"{'N':>5}  {'M':>5}  {'NFE':>6}  {'FID':>10}")
+    else:
+        print(f"{'NFE':>6}  {'FID':>10}")
+    print("-"*45)
+    for r in results:
+        if hrf:
+            print(f"{r['N']:>5}  {r['M']:>5}  {r['nfe']:>6}  {r['fid']:>10.4f}")
+        else:
+            print(f"{r['nfe']:>6}  {r['fid']:>10.4f}")
+    print("="*45)
 
-    # Grafico NFE vs FID
+    # Grafico
     plot_path = os.path.join(fid_dir, "fid_vs_nfe.png")
     plot_fid_vs_nfe(
         nfe_values=nfe_list,
-        fid_values=[results[n] for n in nfe_list],
+        fid_values=fid_list,
+        labels=label_list,
         save_path=plot_path,
         exp_name=FLAGS.exp_name,
         integration_method=FLAGS.integration_method,
