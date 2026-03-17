@@ -73,7 +73,7 @@ def get_beta(step, total_end_step, beta_max, warmup_frac):
 
     Parametri:
         step:           step corrente assoluto
-        total_end_step: FLAGS.total_steps — orizzonte fisso, indipendente dal checkpoint
+        total_end_step: FLAGS.total_steps - orizzonte fisso, indipendente dal checkpoint
         beta_max:       valore massimo di beta (FLAGS.beta)
         warmup_frac:    frazione dell'orizzonte totale dedicata all'annealing
 
@@ -89,18 +89,18 @@ def kl_with_free_bits(kl_per_dim, free_bits):
     """Free bits applicato per dimensione latente, poi mediato su batch e dimensioni.
 
     Parametri:
-        kl_per_dim: [B, latent_dim] — KL per ogni elemento del batch e ogni dimensione
+        kl_per_dim: [B, latent_dim] - KL per ogni elemento del batch e ogni dimensione
         free_bits:  soglia minima per dimensione in nats
 
     Il clamp viene applicato PRIMA della media così ogni dimensione deve
-    contribuire almeno free_bits, indipendentemente dalle altre.
+    contribuire almeno con peso free_bits, indipendentemente dalle altre.
     Questo impedisce che alcune dimensioni collassino a zero mentre
     la media rimane alta grazie ad altre dimensioni attive.
     Se free_bits=0.0 si comporta come il KL standard.
     """
     if free_bits <= 0.0:
         return kl_per_dim.mean()
-    return torch.clamp(kl_per_dim, min=free_bits).mean()
+    return torch.clamp(kl_per_dim, min=free_bits).mean() 
 
 
 def train(argv):
@@ -244,12 +244,12 @@ def train(argv):
             if variational:
                 recon_loss  = torch.mean((pred - target) ** 2)
                 kl_per_dim  = _kl_divergence(mu, log_var)          # [B, latent_dim]
-                kl_loss     = kl_per_dim.mean()                     # scalare per logging
+                kl_loss     = kl_per_dim.mean()                    # valore kl per i grafici prima del free bits
                 beta        = get_beta(step, total_end_step, beta_max, kl_warmup_frac)
                 # free bits applicato per dimensione prima della media:
                 # ogni dimensione latente deve contribuire almeno free_bits nats,
                 # impedendo il collapse parziale anche quando la media è alta
-                kl_weighted = kl_with_free_bits(kl_per_dim, free_bits)
+                kl_weighted = kl_with_free_bits(kl_per_dim, free_bits) # free bits applicato per dimensione prima della media
                 loss        = recon_loss + kl_weighted * beta
             else:
                 loss = torch.mean((pred - target) ** 2)
@@ -272,7 +272,7 @@ def train(argv):
             else:
                 pbar.set_postfix(loss=f"{loss.item():.4f}")
 
-            if save_step > 0 and step % save_step == 0 and step > 0:
+            if  (step + 1) % save_step == 0:
                 if FLAGS.generate_samples:
                     generate_samples(unet, imgdir, step, (16, *data_shape), device,
                                     net_="normal", integration_method=FLAGS.integration_method,
@@ -302,6 +302,11 @@ def train(argv):
                     writer.add_scalar("loss/beta",     beta,            step)
                     writer.add_scalar("vae/mu",        mu.mean(),       step)
                     writer.add_scalar("vae/log_var",   log_var.mean(),  step)
+                    if step % (tb_step * 10) == 0:
+                        kl_dim_mean = kl_per_dim.mean(dim=0) 
+                        for i in range(kl_dim_mean.shape[0]):
+                            writer.add_scalar(f"kl_dim/{i}", kl_dim_mean[i].item(), step)
+
 
 
 if __name__ == "__main__":
