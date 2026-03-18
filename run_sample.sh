@@ -5,4 +5,6 @@ python sample.py \
   --exp_name='exp_vegeta' \
   --gpu=-1 \
   --integration_method='euler' \
-  --num_samples=4
+  --num_samples=4 \
+  --num_steps=1000 \
+  

@@ -1,4 +1,5 @@
 import copy
+import math
 import os
 import json
 from datetime import datetime
@@ -34,6 +35,7 @@ flags.DEFINE_integer("latent_dim", 128, help="dimension of the latent space for 
 flags.DEFINE_float("beta", 1.0, help="valore massimo del peso KL (raggiunto dopo l'annealing)")
 flags.DEFINE_float("kl_warmup_frac", 0.3, help="frazione dell'orizzonte totale su cui beta cresce da 0 a beta_max")
 flags.DEFINE_float("free_bits", 1.0, help="soglia KL minima per dimensione in nats (0.0 per disabilitare)")
+flags.DEFINE_integer("n_cycles", 3, help="numero di cicli per il cyclic cosine annealing")
 
 # UNet
 flags.DEFINE_integer("num_channel", 128, help="base channel of UNet")
@@ -84,6 +86,21 @@ def get_beta(step, total_end_step, beta_max, warmup_frac):
         return beta_max
     return beta_max * min(step / warmup_steps, 1.0)
 
+def get_beta_cosine(step, total_steps, beta_max, warmup_frac=0.3):
+    warmup_end = int(total_steps * warmup_frac)
+    if step >= warmup_end:
+        return beta_max
+    cos = math.cos(math.pi * (1 - step / warmup_end))
+    return beta_max * (1 - cos) / 2
+
+def get_beta_cyclic_cosine(step, total_steps, beta_max, n_cycles=3, warmup_frac=0.5):
+    cycle_length = total_steps / n_cycles
+    cycle_pos    = step % cycle_length
+    warmup_end   = cycle_length * warmup_frac
+    if cycle_pos >= warmup_end:
+        return beta_max
+    cos = math.cos(math.pi * (1 - cycle_pos / warmup_end))
+    return beta_max * (1 - cos) / 2
 
 def kl_with_free_bits(kl_per_dim, free_bits):
     """Free bits applicato per dimensione latente, poi mediato su batch e dimensioni.
@@ -143,7 +160,13 @@ def train(argv):
         "beta":                 FLAGS.beta,
         "kl_warmup_frac":       FLAGS.kl_warmup_frac,
         "free_bits":            FLAGS.free_bits,
+        "n_cycles":             FLAGS.n_cycles,
+        "lr":                   FLAGS.lr,
+        "batch_size":           FLAGS.batch_size,
+        "total_steps":          FLAGS.total_steps,
+        "ema_decay":            FLAGS.ema_decay,
     }
+    
     config_path = os.path.join(savedir, "config.json")
     with open(config_path, "w") as f:
         json.dump(model_config, f, indent=2)
@@ -176,17 +199,23 @@ def train(argv):
 
     model_size = sum(p.data.nelement() for p in unet.parameters())
     print(f"Model params: {model_size} ({model_size/1e6:.2f} M)")
+    model_config["model_params"] = model_size
 
     ema_model = copy.deepcopy(unet)
 
     if FLAGS.variational:
         vae_size = sum(p.data.nelement() for p in vae.parameters())
         print(f"VAE params: {vae_size} ({vae_size/1e6:.2f} M)")
+        model_config["vae_params"] = vae_size
         optim = torch.optim.Adam(list(unet.parameters()) + list(vae.parameters()), lr=FLAGS.lr)
     else:
         optim = torch.optim.Adam(unet.parameters(), lr=FLAGS.lr)
 
     sched = torch.optim.lr_scheduler.LambdaLR(optim, lr_lambda=warmup_lr)
+
+
+    with open(config_path, "w") as f:
+        json.dump(model_config, f, indent=2)
 
     cur_step = 0
     ckpt_list = os.listdir(ckptdir)
@@ -220,6 +249,7 @@ def train(argv):
     grad_clip      = FLAGS.grad_clip
     save_step      = FLAGS.save_step
     tb_step        = FLAGS.tb_step
+    n_cycles       = FLAGS.n_cycles
 
     FM = ConditionalFlowMatcher(sigma=0.0)
 
@@ -245,7 +275,7 @@ def train(argv):
                 recon_loss  = torch.mean((pred - target) ** 2)
                 kl_per_dim  = _kl_divergence(mu, log_var)          # [B, latent_dim]
                 kl_loss     = kl_per_dim.mean()                    # valore kl per i grafici prima del free bits
-                beta        = get_beta(step, total_end_step, beta_max, kl_warmup_frac)
+                beta        = get_beta_cyclic_cosine(step, total_end_step, beta_max, n_cycles, kl_warmup_frac)
                 # free bits applicato per dimensione prima della media:
                 # ogni dimensione latente deve contribuire almeno free_bits nats,
                 # impedendo il collapse parziale anche quando la media è alta

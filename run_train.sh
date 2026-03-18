@@ -7,12 +7,13 @@ python train.py \
     --output_dir='./test' \
     --exp_name='exp_vegeta' \
     --dataset='mnist' \
-    --model_type='baseline' \
-    --variational=False \
-    --latent_dim=64 \
+    --model_type='unet_cat_hrf' \
+    --variational=True \
+    --latent_dim=16 \
     --beta=1.0 \
     --kl_warmup_frac=0.3 \
     --free_bits=1.0 \
+    --n_cycles=3 \
     --integration_method="euler" \
     --gpu=-1 \
     --num_channel=128 \
@@ -23,7 +24,7 @@ python train.py \
     --ot_bs=16 \
     --num_workers=0 \
     --ema_decay=0.99 \
-    --continue_train=True \
+    --continue_train=False \
     --save_step=4 \
     --tb_step=1 \
     --use_scale_shift_norm=False \
