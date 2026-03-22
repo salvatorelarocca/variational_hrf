@@ -5,20 +5,21 @@
 #utilizzato se FM=ExactOptimalTransportConditionalFlowMatch
 python train.py \
     --output_dir='./test' \
-    --exp_name='exp_vegeta' \
+    --exp_name='prova2' \
     --dataset='mnist' \
     --model_type='unet_cat_hrf' \
     --variational=True \
     --latent_dim=16 \
-    --beta=1.0 \
-    --kl_warmup_frac=0.3 \
+    --beta=0.3 \
+    --kl_warmup_frac=0.6 \
     --free_bits=1.0 \
-    --n_cycles=3 \
+    --n_cycles=2 \
+    --beta_schedule="cyclic_cosine" \
     --integration_method="euler" \
     --gpu=-1 \
     --num_channel=128 \
     --channel_mult=1 \
-    --total_steps=30 \
+    --total_steps=31 \
     --warmup=50 \
     --batch_size=16 \
     --ot_bs=16 \

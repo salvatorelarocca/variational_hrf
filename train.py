@@ -29,13 +29,17 @@ flags.DEFINE_bool("use_scale_shift_norm", False, help="use scale shift norm")
 flags.DEFINE_enum("integration_method", "euler", ["euler", "dopri5"], help="integration method for sampling")
 flags.DEFINE_bool("generate_samples", True, help="whether to generate samples during training")
 
-# Variational HRF
+# Variational 
 flags.DEFINE_bool("variational", False, help="train variational hrf or deterministic hrf")
 flags.DEFINE_integer("latent_dim", 128, help="dimension of the latent space for the VAE in variational HRF")
 flags.DEFINE_float("beta", 1.0, help="valore massimo del peso KL (raggiunto dopo l'annealing)")
 flags.DEFINE_float("kl_warmup_frac", 0.3, help="frazione dell'orizzonte totale su cui beta cresce da 0 a beta_max")
 flags.DEFINE_float("free_bits", 1.0, help="soglia KL minima per dimensione in nats (0.0 per disabilitare)")
 flags.DEFINE_integer("n_cycles", 3, help="numero di cicli per il cyclic cosine annealing")
+flags.DEFINE_enum("beta_schedule", 
+                  "linear", ["linear", "cosine", "cyclic_cosine", "exponential"],
+                  help="tipo di annealing per beta: linear, cosine, cyclic_cosine, exponential")
+flags.DEFINE_list("hidden_vae", [32, 64, 128], help="hidden dimensions for the VAE encoder CNN, indipendenti dalla dimensione spaziale degli input")
 
 # UNet
 flags.DEFINE_integer("num_channel", 128, help="base channel of UNet")
@@ -90,7 +94,7 @@ def get_beta_cosine(step, total_steps, beta_max, warmup_frac=0.3):
     warmup_end = int(total_steps * warmup_frac)
     if step >= warmup_end:
         return beta_max
-    cos = math.cos(math.pi * (1 - step / warmup_end))
+    cos = math.cos(math.pi * step / warmup_end)
     return beta_max * (1 - cos) / 2
 
 def get_beta_cyclic_cosine(step, total_steps, beta_max, n_cycles=3, warmup_frac=0.5):
@@ -99,8 +103,17 @@ def get_beta_cyclic_cosine(step, total_steps, beta_max, n_cycles=3, warmup_frac=
     warmup_end   = cycle_length * warmup_frac
     if cycle_pos >= warmup_end:
         return beta_max
-    cos = math.cos(math.pi * (1 - cycle_pos / warmup_end))
+    cos = math.cos(math.pi * cycle_pos / warmup_end)
     return beta_max * (1 - cos) / 2
+
+def get_beta_exponential(step, total_steps, beta_max, warmup_frac=0.3):
+    warmup_end = int(total_steps * warmup_frac)
+    if warmup_end == 0:
+        return beta_max
+    if step >= warmup_end:
+        return beta_max
+    # normalizzato per partire da 0 e arrivare esattamente a beta_max
+    return beta_max * (math.exp(step / warmup_end) - 1) / (math.e - 1)
 
 def kl_with_free_bits(kl_per_dim, free_bits):
     """Free bits applicato per dimensione latente, poi mediato su batch e dimensioni.
@@ -154,6 +167,7 @@ def train(argv):
         "model_type":           FLAGS.model_type,
         "num_channel":          FLAGS.num_channel,
         "channel_mult":         [int(x) for x in FLAGS.channel_mult],
+        "hidden_vae":           [int(x) for x in FLAGS.hidden_vae],
         "latent_dim":           FLAGS.latent_dim,
         "variational":          FLAGS.variational,
         "use_scale_shift_norm": FLAGS.use_scale_shift_norm,
@@ -165,6 +179,7 @@ def train(argv):
         "batch_size":           FLAGS.batch_size,
         "total_steps":          FLAGS.total_steps,
         "ema_decay":            FLAGS.ema_decay,
+        "beta_schedule":        FLAGS.beta_schedule,
     }
     
     config_path = os.path.join(savedir, "config.json")
@@ -193,8 +208,19 @@ def train(argv):
     )
 
     if FLAGS.variational:
-        vae = BetaVAE(in_channels=data_shape[0], latent_dim=FLAGS.latent_dim).to(device)
-
+        vae = BetaVAE(in_channels=data_shape[0], latent_dim=FLAGS.latent_dim, hidden_dims=FLAGS.hidden_vae).to(device)
+        # seleziona la funzione in base alla flag
+        if FLAGS.beta_schedule == "linear":
+            get_beta_fn = lambda step: get_beta(step, total_end_step, beta_max, kl_warmup_frac)
+        elif FLAGS.beta_schedule == "cosine":
+            get_beta_fn = lambda step: get_beta_cosine(step, total_end_step, beta_max, kl_warmup_frac)
+        elif FLAGS.beta_schedule == "cyclic_cosine":
+            get_beta_fn = lambda step: get_beta_cyclic_cosine(step, total_end_step, beta_max, n_cycles, kl_warmup_frac)
+        elif FLAGS.beta_schedule == "exponential":
+            get_beta_fn = lambda step: get_beta_exponential(step, total_end_step, beta_max, kl_warmup_frac)
+        else:
+            raise ValueError(f"Invalid beta_schedule: {FLAGS.beta_schedule}")
+        
     hrf = FLAGS.model_type in ["unet_cat_hrf", "2unet_hrf"]
 
     model_size = sum(p.data.nelement() for p in unet.parameters())
@@ -212,7 +238,6 @@ def train(argv):
         optim = torch.optim.Adam(unet.parameters(), lr=FLAGS.lr)
 
     sched = torch.optim.lr_scheduler.LambdaLR(optim, lr_lambda=warmup_lr)
-
 
     with open(config_path, "w") as f:
         json.dump(model_config, f, indent=2)
@@ -275,7 +300,7 @@ def train(argv):
                 recon_loss  = torch.mean((pred - target) ** 2)
                 kl_per_dim  = _kl_divergence(mu, log_var)          # [B, latent_dim]
                 kl_loss     = kl_per_dim.mean()                    # valore kl per i grafici prima del free bits
-                beta        = get_beta_cyclic_cosine(step, total_end_step, beta_max, n_cycles, kl_warmup_frac)
+                beta        = get_beta_fn(step)
                 # free bits applicato per dimensione prima della media:
                 # ogni dimensione latente deve contribuire almeno free_bits nats,
                 # impedendo il collapse parziale anche quando la media è alta
