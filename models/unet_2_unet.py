@@ -319,8 +319,8 @@ class UNetModel(nn.Module):
                         dims=dims,
                         use_checkpoint=use_checkpoint,
                         use_scale_shift_norm=use_scale_shift_norm,
-                        use_latent=self.use_latent,
-                        latent_dim=self.latent_dim
+                        # use_latent=self.use_latent,
+                        # latent_dim=self.latent_dim
                     )
                 ]
                 ch = int(mult * model_channels) # aggiorna la dimensione del canale dopo il blocco ResBlock_v
@@ -332,8 +332,8 @@ class UNetModel(nn.Module):
                             num_heads=num_heads,
                             num_head_channels=num_head_channels,
                             use_new_attention_order=use_new_attention_order,
-                            latent_dim=self.latent_dim,
-                            use_latent=self.use_latent,
+                            # latent_dim=self.latent_dim,
+                            # use_latent=self.use_latent,
                         )
                     )
                 self.input_blocks.append(TimestepEmbedSequential(*layers))
@@ -373,8 +373,8 @@ class UNetModel(nn.Module):
                 dims=dims,
                 use_checkpoint=use_checkpoint,
                 use_scale_shift_norm=use_scale_shift_norm,
-                use_latent=self.use_latent,
-                latent_dim=self.latent_dim
+                # use_latent=self.use_latent,
+                # latent_dim=self.latent_dim
             ),
             AttentionBlock(
                 ch,
@@ -382,8 +382,8 @@ class UNetModel(nn.Module):
                 num_heads=num_heads,
                 num_head_channels=num_head_channels,
                 use_new_attention_order=use_new_attention_order,
-                            latent_dim=self.latent_dim,
-                            use_latent=self.use_latent,
+                            # latent_dim=self.latent_dim,
+                            # use_latent=self.use_latent,
                         ),
             ResBlock(
                 ch,
@@ -392,8 +392,8 @@ class UNetModel(nn.Module):
                 dims=dims,
                 use_checkpoint=use_checkpoint,
                 use_scale_shift_norm=use_scale_shift_norm,
-                use_latent=self.use_latent,
-                            latent_dim=self.latent_dim,
+                # use_latent=self.use_latent,
+                #             latent_dim=self.latent_dim,
             ),
         )
         self._feature_size += ch
@@ -412,8 +412,8 @@ class UNetModel(nn.Module):
                         dims=dims,
                         use_checkpoint=use_checkpoint,
                         use_scale_shift_norm=use_scale_shift_norm,
-                        use_latent=self.use_latent,
-                        latent_dim=self.latent_dim
+                        # use_latent=self.use_latent,
+                        # latent_dim=self.latent_dim
                     )
                 ]
                 ch = int(model_channels * mult)
@@ -425,8 +425,8 @@ class UNetModel(nn.Module):
                             num_heads=num_heads_upsample,
                             num_head_channels=num_head_channels,
                             use_new_attention_order=use_new_attention_order,
-                            latent_dim=self.latent_dim,
-                            use_latent=self.use_latent,
+                            # latent_dim=self.latent_dim,
+                            # use_latent=self.use_latent,
                         )
                     )
                 if level and i == num_res_blocks: #L’ultimo blocco di ogni livello (eccetto l’ultimo livello più basso) fa upsampling per risalire verso la risoluzione originale.
@@ -441,8 +441,8 @@ class UNetModel(nn.Module):
                             use_checkpoint=use_checkpoint,
                             use_scale_shift_norm=use_scale_shift_norm,
                             up=True, #res in modalità upsampling
-                            use_latent=self.use_latent,
-                            latent_dim=self.latent_dim
+                            # use_latent=self.use_latent,
+                            # latent_dim=self.latent_dim
                         )
                         if resblock_updown
                         else Upsample(ch, conv_resample, dims=dims, out_channels=out_ch)

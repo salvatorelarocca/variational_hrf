@@ -336,4 +336,3 @@ class VNetD(torch.nn.Module):
         x = self.fc3(x)
 
         return x
-

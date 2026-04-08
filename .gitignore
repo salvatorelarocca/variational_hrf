@@ -13,6 +13,7 @@ develop-eggs/
 dist/
 downloads/
 test*/
+results/
 eggs/
 .eggs/
 lib/
@@ -187,3 +188,6 @@ notebooks/figures/
 
 # Tensorboard
 events*
+
+#script bash
+*.sh

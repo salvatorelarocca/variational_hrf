@@ -149,8 +149,8 @@ class UNetModel(nn.Module):
                             num_heads=num_heads,
                             num_head_channels=num_head_channels,
                             use_new_attention_order=use_new_attention_order,
-                            latent_dim=self.latent_dim,
-                            use_latent=self.use_latent,
+                            # latent_dim=self.latent_dim,
+                            # use_latent=self.use_latent,
                         )
                     )
                 self.input_blocks.append(TimestepEmbedSequential(*layers))
@@ -198,8 +198,8 @@ class UNetModel(nn.Module):
                 num_heads=num_heads,
                 num_head_channels=num_head_channels,
                 use_new_attention_order=use_new_attention_order,
-                latent_dim=self.latent_dim,
-                use_latent=self.use_latent,
+                # latent_dim=self.latent_dim,
+                # use_latent=self.use_latent,
             ),
             ResBlock(
                 ch,
@@ -227,8 +227,8 @@ class UNetModel(nn.Module):
                         dims=dims,
                         use_checkpoint=use_checkpoint,
                         use_scale_shift_norm=use_scale_shift_norm,
-                        latent_dim=self.latent_dim,
-                        use_latent=self.use_latent,
+                        # latent_dim=self.latent_dim,
+                        # use_latent=self.use_latent,
                     )
                 ]
                 ch = int(model_channels * mult)
@@ -240,8 +240,8 @@ class UNetModel(nn.Module):
                             num_heads=num_heads_upsample,
                             num_head_channels=num_head_channels,
                             use_new_attention_order=use_new_attention_order,
-                            latent_dim=self.latent_dim,
-                            use_latent=self.use_latent,
+                            # latent_dim=self.latent_dim,
+                            # use_latent=self.use_latent,
                         )
                     )
                 if level and i == num_res_blocks:
@@ -256,8 +256,8 @@ class UNetModel(nn.Module):
                             use_checkpoint=use_checkpoint,
                             use_scale_shift_norm=use_scale_shift_norm,
                             up=True,
-                            latent_dim=self.latent_dim,
-                            use_latent=self.use_latent,
+                            # latent_dim=self.latent_dim,
+                            # use_latent=self.use_latent,
                         )
                         if resblock_updown
                         else Upsample(ch, conv_resample, dims=dims, out_channels=out_ch)

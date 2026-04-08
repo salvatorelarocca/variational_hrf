@@ -139,7 +139,11 @@ def main(argv):
 
     iterations = FLAGS.iter
     base_dir = os.path.join(FLAGS.base_dir, FLAGS.data_type)
-    device = torch.device(f'cuda:{FLAGS.gpu}') if torch.cuda.is_available() else torch.device('cpu')
+
+    if FLAGS.gpu is not None and FLAGS.gpu >= 0 and torch.cuda.is_available():
+        device = torch.device(f"cuda:{FLAGS.gpu}")
+    else:
+        device = torch.device("cpu")
 
     data = LowDimData(data_type=FLAGS.data_type, device=device)
     checkpoint = {

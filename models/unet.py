@@ -361,14 +361,14 @@ class AttentionBlock(TimestepBlockWz):
 
         '''Innesto z: aggiunge un context token alla sequenza spaziale'''
         if self.use_latent and z is not None:
-            # print("Z DISPONIBILE&UTILIZZATA IN ATTENTION")
+            #print("Z DISPONIBILE&UTILIZZATA IN ATTENTION")
             # Proietta z: [B, latent_dim] -> [B, C] -> [B, C, 1]
             z_token = self.z_proj(z).unsqueeze(-1)          # [B, C, 1]
             z_token = self.z_norm(z_token)                  # normalizza come gli altri token
             # Concatena il token z alla sequenza: [B, C, HW+1]
             x_with_z = th.cat([x, z_token], dim=-1)
         else:
-            # print("Z NON UTILIZZATA IN ATTENTION")
+            #print("Z NON UTILIZZATA IN ATTENTION")
             x_with_z = x
         '''---------------------------------------------------'''
 
@@ -377,7 +377,7 @@ class AttentionBlock(TimestepBlockWz):
 
         # Rimuove il token z dall'output prima della skip connection
         if self.use_latent and z is not None:
-            h = h[:, :, :-1]  # [B, C, HW] — scarta l'ultimo token (era z)
+            h = h[:, :, :-1]  # [B, C, HW] - scarta l'ultimo token (era z)
 
         h = self.proj_out(h)
         return (x + h).reshape(b, c, *spatial)
@@ -576,6 +576,8 @@ class UNetModel(nn.Module):
                         dims=dims,
                         use_checkpoint=use_checkpoint,
                         use_scale_shift_norm=use_scale_shift_norm,
+                        use_latent=self.use_latent,
+                        latent_dim=self.latent_dim
                     )
                 ]
                 ch = int(mult * model_channels)
@@ -587,8 +589,8 @@ class UNetModel(nn.Module):
                             num_heads=num_heads,
                             num_head_channels=num_head_channels,
                             use_new_attention_order=use_new_attention_order,
-                            latent_dim=self.latent_dim,
-                            use_latent=self.use_latent,
+                            # latent_dim=self.latent_dim,
+                            # use_latent=self.use_latent,
                         )
                     )
                 self.input_blocks.append(TimestepEmbedSequential(*layers))
@@ -607,6 +609,8 @@ class UNetModel(nn.Module):
                             use_checkpoint=use_checkpoint,
                             use_scale_shift_norm=use_scale_shift_norm,
                             down=True,
+                            use_latent=self.use_latent,
+                            latent_dim=self.latent_dim
                         )
                         if resblock_updown
                         else Downsample(ch, conv_resample, dims=dims, out_channels=out_ch)
@@ -625,6 +629,8 @@ class UNetModel(nn.Module):
                 dims=dims,
                 use_checkpoint=use_checkpoint,
                 use_scale_shift_norm=use_scale_shift_norm,
+                use_latent=self.use_latent,
+                latent_dim=self.latent_dim
             ),
             AttentionBlock(
                 ch,
@@ -632,8 +638,8 @@ class UNetModel(nn.Module):
                 num_heads=num_heads,
                 num_head_channels=num_head_channels,
                 use_new_attention_order=use_new_attention_order,
-                latent_dim=self.latent_dim,
-                use_latent=self.use_latent,
+                # latent_dim=self.latent_dim,
+                # use_latent=self.use_latent,
             ),
             ResBlock(
                 ch,
@@ -642,6 +648,8 @@ class UNetModel(nn.Module):
                 dims=dims,
                 use_checkpoint=use_checkpoint,
                 use_scale_shift_norm=use_scale_shift_norm,
+                use_latent=self.use_latent,
+                latent_dim=self.latent_dim
             ),
         )
         self._feature_size += ch
@@ -659,6 +667,8 @@ class UNetModel(nn.Module):
                         dims=dims,
                         use_checkpoint=use_checkpoint,
                         use_scale_shift_norm=use_scale_shift_norm,
+                        # use_latent=self.use_latent,
+                        # latent_dim=self.latent_dim
                     )
                 ]
                 ch = int(model_channels * mult)
@@ -670,8 +680,8 @@ class UNetModel(nn.Module):
                             num_heads=num_heads_upsample,
                             num_head_channels=num_head_channels,
                             use_new_attention_order=use_new_attention_order,
-                            latent_dim=self.latent_dim,
-                            use_latent=self.use_latent,
+                            # latent_dim=self.latent_dim,
+                            # use_latent=self.use_latent,
                         )
                     )
                 if level and i == num_res_blocks:
@@ -686,6 +696,8 @@ class UNetModel(nn.Module):
                             use_checkpoint=use_checkpoint,
                             use_scale_shift_norm=use_scale_shift_norm,
                             up=True,
+                            # use_latent=self.use_latent,
+                            # latent_dim=self.latent_dim
                         )
                         if resblock_updown
                         else Upsample(ch, conv_resample, dims=dims, out_channels=out_ch)

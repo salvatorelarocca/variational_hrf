@@ -29,17 +29,12 @@ flags.DEFINE_bool("use_scale_shift_norm", False, help="use scale shift norm")
 flags.DEFINE_enum("integration_method", "euler", ["euler", "dopri5"], help="integration method for sampling")
 flags.DEFINE_bool("generate_samples", True, help="whether to generate samples during training")
 
-# Variational 
+# Variational
 flags.DEFINE_bool("variational", False, help="train variational hrf or deterministic hrf")
-flags.DEFINE_integer("latent_dim", 128, help="dimension of the latent space for the VAE in variational HRF")
+flags.DEFINE_integer("latent_dim", 32, help="dimension of the latent space for the VAE in variational HRF")
 flags.DEFINE_float("beta", 1.0, help="valore massimo del peso KL (raggiunto dopo l'annealing)")
+flags.DEFINE_list("hidden_vae", [32, 64, 128], help="hidden dimensions for the VAE encoder CNN")
 flags.DEFINE_float("kl_warmup_frac", 0.3, help="frazione dell'orizzonte totale su cui beta cresce da 0 a beta_max")
-flags.DEFINE_float("free_bits", 1.0, help="soglia KL minima per dimensione in nats (0.0 per disabilitare)")
-flags.DEFINE_integer("n_cycles", 3, help="numero di cicli per il cyclic cosine annealing")
-flags.DEFINE_enum("beta_schedule", 
-                  "linear", ["linear", "cosine", "cyclic_cosine", "exponential"],
-                  help="tipo di annealing per beta: linear, cosine, cyclic_cosine, exponential")
-flags.DEFINE_list("hidden_vae", [32, 64, 128], help="hidden dimensions for the VAE encoder CNN, indipendenti dalla dimensione spaziale degli input")
 
 # UNet
 flags.DEFINE_integer("num_channel", 128, help="base channel of UNet")
@@ -60,6 +55,7 @@ flags.DEFINE_bool("continue_train", False, help="continue training from last che
 # Evaluation
 flags.DEFINE_integer("save_step", 20000, help="frequency of saving checkpoints, 0 to disable")
 flags.DEFINE_integer("tb_step", 50, help="frequency of saving to tensorboard")
+flags.DEFINE_integer("val_batches", 50, help="numero di batch per la validation loss (50 * batch_size campioni)")
 
 
 def warmup_lr(step):
@@ -67,70 +63,68 @@ def warmup_lr(step):
 
 
 def _kl_divergence(mu, log_var):
-    """Calcola KL per ogni elemento del batch e ogni dimensione latente.
-    Ritorna [B, latent_dim] dopo viene data a free_bits per evitare il collapse parziale.
-    log_var = log(sigma^2)
-    """
+    """KL per ogni elemento del batch e ogni dimensione latente. [B, latent_dim]"""
     return 0.5 * (mu.pow(2) + log_var.exp() - log_var - 1)
 
 
-def get_beta(step, total_end_step, beta_max, warmup_frac):
-    """KL annealing: beta cresce linearmente da 0 a beta_max.
-
-    Parametri:
-        step:           step corrente assoluto
-        total_end_step: FLAGS.total_steps - orizzonte fisso, indipendente dal checkpoint
-        beta_max:       valore massimo di beta (FLAGS.beta)
-        warmup_frac:    frazione dell'orizzonte totale dedicata all'annealing
-
-    Se si riprende da un checkpoint con step > warmup_steps, beta è già a beta_max.
+def evaluate(unet, vae, val_datalooper, FM, device, beta, variational, hrf, n_val_batches):
     """
-    warmup_steps = int(total_end_step * warmup_frac)
-    if warmup_steps == 0:
-        return beta_max
-    return beta_max * min(step / warmup_steps, 1.0)
-
-def get_beta_cosine(step, total_steps, beta_max, warmup_frac=0.3):
-    warmup_end = int(total_steps * warmup_frac)
-    if step >= warmup_end:
-        return beta_max
-    cos = math.cos(math.pi * step / warmup_end)
-    return beta_max * (1 - cos) / 2
-
-def get_beta_cyclic_cosine(step, total_steps, beta_max, n_cycles=3, warmup_frac=0.5):
-    cycle_length = total_steps / n_cycles
-    cycle_pos    = step % cycle_length
-    warmup_end   = cycle_length * warmup_frac
-    if cycle_pos >= warmup_end:
-        return beta_max
-    cos = math.cos(math.pi * cycle_pos / warmup_end)
-    return beta_max * (1 - cos) / 2
-
-def get_beta_exponential(step, total_steps, beta_max, warmup_frac=0.3):
-    warmup_end = int(total_steps * warmup_frac)
-    if warmup_end == 0:
-        return beta_max
-    if step >= warmup_end:
-        return beta_max
-    # normalizzato per partire da 0 e arrivare esattamente a beta_max
-    return beta_max * (math.exp(step / warmup_end) - 1) / (math.e - 1)
-
-def kl_with_free_bits(kl_per_dim, free_bits):
-    """Free bits applicato per dimensione latente, poi mediato su batch e dimensioni.
-
-    Parametri:
-        kl_per_dim: [B, latent_dim] - KL per ogni elemento del batch e ogni dimensione
-        free_bits:  soglia minima per dimensione in nats
-
-    Il clamp viene applicato PRIMA della media così ogni dimensione deve
-    contribuire almeno con peso free_bits, indipendentemente dalle altre.
-    Questo impedisce che alcune dimensioni collassino a zero mentre
-    la media rimane alta grazie ad altre dimensioni attive.
-    Se free_bits=0.0 si comporta come il KL standard.
+    Calcola la validation loss su n_val_batches batch senza aggiornare i pesi.
+    Usa .eval() per disabilitare dropout e BatchNorm in modalita' inferenza.
+    Ritorna dict con loss, recon, kl (kl=0 se non variational).
     """
-    if free_bits <= 0.0:
-        return kl_per_dim.mean()
-    return torch.clamp(kl_per_dim, min=free_bits).mean() 
+    unet.eval()
+    if variational and vae is not None:
+        vae.eval()
+
+    total_loss  = 0.0
+    total_recon = 0.0
+    total_kl    = 0.0
+
+    with torch.no_grad():
+        for _ in range(n_val_batches):
+            x1 = next(val_datalooper).to(device)
+            x0 = torch.randn_like(x1)
+            t, xt, target = FM.sample_location_and_conditional_flow(x0, x1)
+
+            if hrf:
+                v0 = torch.randn_like(target)
+                tau, vtau, target = FM.sample_location_and_conditional_flow(v0, target)
+                if variational:
+                    '''il vae prende in input partenza, arrivo, valori intermeti e tempo della velocità'''
+                    z, mu, log_var = vae(v0, target, vtau, tau) #v0, v1, vtau, tau z = q(z | start, target, state_t, time)
+                    '''quindi unet deve innestare z solo nei resblock della velocità?'''
+                    pred = unet(tau, vtau, t, xt, z=z)
+                else:
+                    pred = unet(tau, vtau, t, xt)
+            else:
+                if variational:
+                    z, mu, log_var = vae(x0, target, xt, t) # uguale per hrf ma i parametri sono quelli spaziali
+                    pred = unet(t, xt, z=z)
+                else:
+                    pred = unet(t, xt)
+
+            if variational:
+                recon_loss = torch.mean((pred - target) ** 2)
+                kl_loss    = _kl_divergence(mu, log_var).mean()
+                loss       = recon_loss + kl_loss * beta
+                total_recon += recon_loss.item()
+                total_kl    += kl_loss.item()
+            else:
+                loss = torch.mean((pred - target) ** 2)
+
+            total_loss += loss.item()
+
+    # ripristina modalita' training
+    unet.train()
+    if variational and vae is not None:
+        vae.train()
+
+    return {
+        "loss":  total_loss  / n_val_batches,
+        "recon": total_recon / n_val_batches,
+        "kl":    total_kl    / n_val_batches,
+    }
 
 
 def train(argv):
@@ -160,8 +154,6 @@ def train(argv):
     os.makedirs(imgdir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    # Salva la configurazione strutturale una volta sola prima del loop.
-    # I parametri architetturali non cambiano durante il training.
     model_config = {
         "dataset":              FLAGS.dataset,
         "model_type":           FLAGS.model_type,
@@ -172,56 +164,44 @@ def train(argv):
         "variational":          FLAGS.variational,
         "use_scale_shift_norm": FLAGS.use_scale_shift_norm,
         "beta":                 FLAGS.beta,
-        "kl_warmup_frac":       FLAGS.kl_warmup_frac,
-        "free_bits":            FLAGS.free_bits,
-        "n_cycles":             FLAGS.n_cycles,
         "lr":                   FLAGS.lr,
         "batch_size":           FLAGS.batch_size,
         "total_steps":          FLAGS.total_steps,
         "ema_decay":            FLAGS.ema_decay,
-        "beta_schedule":        FLAGS.beta_schedule,
     }
-    
+
     config_path = os.path.join(savedir, "config.json")
     with open(config_path, "w") as f:
         json.dump(model_config, f, indent=2)
     print(f"Configurazione salvata in: {config_path}")
 
     datalooper, data_shape = get_datalooper(
-        FLAGS.dataset,
-        FLAGS.batch_size,
-        FLAGS.num_workers,
-        train=True,
-        imagenet_root=FLAGS.imagenet_root,
+        FLAGS.dataset, FLAGS.batch_size, FLAGS.num_workers,
+        train=True, imagenet_root=FLAGS.imagenet_root,
+    )
+
+    val_datalooper, _ = get_datalooper(
+        FLAGS.dataset, FLAGS.batch_size, FLAGS.num_workers,
+        train=False, imagenet_root=FLAGS.imagenet_root,
     )
 
     unet = get_model(
-        FLAGS.dataset,
-        data_shape,
-        FLAGS.channel_mult,
-        FLAGS.num_channel,
-        device,
-        model_type=FLAGS.model_type,
-        latent_dim=FLAGS.latent_dim,
-        use_scale_shift=FLAGS.use_scale_shift_norm,
-        use_latent=FLAGS.variational,
+        FLAGS.dataset, data_shape, FLAGS.channel_mult, FLAGS.num_channel, device,
+        model_type=FLAGS.model_type, latent_dim=FLAGS.latent_dim,
+        use_scale_shift=FLAGS.use_scale_shift_norm, use_latent=FLAGS.variational,
     )
-
-    if FLAGS.variational:
-        vae = BetaVAE(in_channels=data_shape[0], latent_dim=FLAGS.latent_dim, hidden_dims=FLAGS.hidden_vae).to(device)
-        # seleziona la funzione in base alla flag
-        if FLAGS.beta_schedule == "linear":
-            get_beta_fn = lambda step: get_beta(step, total_end_step, beta_max, kl_warmup_frac)
-        elif FLAGS.beta_schedule == "cosine":
-            get_beta_fn = lambda step: get_beta_cosine(step, total_end_step, beta_max, kl_warmup_frac)
-        elif FLAGS.beta_schedule == "cyclic_cosine":
-            get_beta_fn = lambda step: get_beta_cyclic_cosine(step, total_end_step, beta_max, n_cycles, kl_warmup_frac)
-        elif FLAGS.beta_schedule == "exponential":
-            get_beta_fn = lambda step: get_beta_exponential(step, total_end_step, beta_max, kl_warmup_frac)
-        else:
-            raise ValueError(f"Invalid beta_schedule: {FLAGS.beta_schedule}")
-        
+    
     hrf = FLAGS.model_type in ["unet_cat_hrf", "2unet_hrf"]
+
+    vae = None
+    if FLAGS.variational:
+        vae = BetaVAE(
+            in_channels=data_shape[0],
+            latent_dim=FLAGS.latent_dim,
+            hidden_dims=FLAGS.hidden_vae,
+        ).to(device)
+
+
 
     model_size = sum(p.data.nelement() for p in unet.parameters())
     print(f"Model params: {model_size} ({model_size/1e6:.2f} M)")
@@ -255,27 +235,22 @@ def train(argv):
         optim.load_state_dict(ckpt['optim'])
         sched.load_state_dict(ckpt['sched'])
         cur_step = ckpt['step'] + 1
-    
+
     writer = tensorboard.SummaryWriter(
-        savedir, 
+        savedir,
         purge_step=cur_step,
         filename_suffix=f".{timestamp}"
-        )
+    )
 
-    # Orizzonte assoluto finale: usato da get_beta per calcolare il warmup
-    # in modo corretto sia per training da zero che per ripresa da checkpoint.
     total_end_step = FLAGS.total_steps
-
-    # Estrae le flag usate nel loop in variabili locali per leggibilità
     variational    = FLAGS.variational
-    beta_max       = FLAGS.beta
-    kl_warmup_frac = FLAGS.kl_warmup_frac
-    free_bits      = FLAGS.free_bits
     grad_clip      = FLAGS.grad_clip
     save_step      = FLAGS.save_step
     tb_step        = FLAGS.tb_step
-    n_cycles       = FLAGS.n_cycles
-
+    beta           = FLAGS.beta
+    val_batches    = FLAGS.val_batches
+    kl_warmup_frac = FLAGS.kl_warmup_frac
+   
     FM = ConditionalFlowMatcher(sigma=0.0)
 
     with trange(cur_step, total_end_step, dynamic_ncols=True, initial=cur_step, total=total_end_step) as pbar:
@@ -289,28 +264,38 @@ def train(argv):
                 v0 = torch.randn_like(target)
                 tau, vtau, target = FM.sample_location_and_conditional_flow(v0, target)
                 if variational:
+                    #HRF+VAE
                     z, mu, log_var = vae(v0, target, vtau, tau)
                     pred = unet(tau, vtau, t, xt, z=z)
                 else:
+                    #HRF
                     pred = unet(tau, vtau, t, xt)
             else:
-                pred = unet(t, xt)
+                if variational:
+                    #RF+VAE
+                    z, mu, log_var = vae(x0, target, xt, t) 
+                    pred = unet(t, xt, z=z)
+                else:
+                    #RF
+                    pred = unet(t, xt)
 
             if variational:
-                recon_loss  = torch.mean((pred - target) ** 2)
-                kl_per_dim  = _kl_divergence(mu, log_var)          # [B, latent_dim]
-                kl_loss     = kl_per_dim.mean()                    # valore kl per i grafici prima del free bits
-                beta        = get_beta_fn(step)
-                # free bits applicato per dimensione prima della media:
-                # ogni dimensione latente deve contribuire almeno free_bits nats,
-                # impedendo il collapse parziale anche quando la media è alta
-                kl_weighted = kl_with_free_bits(kl_per_dim, free_bits) # free bits applicato per dimensione prima della media
-                loss        = recon_loss + kl_weighted * beta
+                recon_loss = torch.mean((pred - target) ** 2)
+                kl_b_dim   = _kl_divergence(mu, log_var)   # [B, latent_dim]
+                kl_loss    = kl_b_dim.mean()
+                anneal = min(1.0, (step + 1) / (total_end_step * kl_warmup_frac))
+                loss       = recon_loss + kl_loss * anneal * beta
             else:
                 loss = torch.mean((pred - target) ** 2)
 
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(unet.parameters(), grad_clip)
+            if variational:
+                torch.nn.utils.clip_grad_norm_(
+                    list(unet.parameters()) + list(vae.parameters()),
+                    grad_clip,
+                )
+            else:
+                torch.nn.utils.clip_grad_norm_(unet.parameters(), grad_clip)
             optim.step()
             sched.step()
             ema(unet, ema_model, FLAGS.ema_decay)
@@ -320,21 +305,37 @@ def train(argv):
                 pbar.set_postfix(
                     loss=f"{loss.item():.4f}",
                     recon=f"{recon_loss.item():.4f}",
-                    kl=f"{kl_loss.item():.4f}",     # reale, non clamped
-                    beta=f"{beta:.4f}",
+                    kl=f"{kl_loss.item():.4f}",
                     mu=f"{mu.mean().item():.4f}",
+                    log_var=f"{log_var.mean().item():.4f}",
                 )
             else:
                 pbar.set_postfix(loss=f"{loss.item():.4f}")
 
-            if  (step + 1) % save_step == 0:
+            # --Salvataggio checkpoint + validation loss--
+            if step % save_step == 0:
+                # validation loss - calcolata prima di salvare il checkpoint
+                val = evaluate(
+                    unet, vae, val_datalooper, FM,
+                    device, beta, variational, hrf, val_batches,
+                )
+                writer.add_scalar("val/loss",  val["loss"],  step)
+                if variational:
+                    writer.add_scalar("val/recon", val["recon"], step)
+                    writer.add_scalar("val/kl", val["kl"], step)
+                print(
+                    f"\n  [step {step}] val_loss={val['loss']:.4f}"
+                    + (f"  val_recon={val['recon']:.4f}  val_kl={val['kl']:.4f}" if variational else "")
+                )
+
                 if FLAGS.generate_samples:
                     generate_samples(unet, imgdir, step, (16, *data_shape), device,
-                                    net_="normal", integration_method=FLAGS.integration_method,
-                                    hrf=hrf, latent_dim=FLAGS.latent_dim)
+                                     net_="normal", integration_method=FLAGS.integration_method,
+                                     hrf=hrf, latent_dim=FLAGS.latent_dim, use_z=variational)
                     generate_samples(ema_model, imgdir, step, (16, *data_shape), device,
-                                    net_="ema", integration_method=FLAGS.integration_method,
-                                    hrf=hrf, latent_dim=FLAGS.latent_dim)
+                                     net_="ema", integration_method=FLAGS.integration_method,
+                                     hrf=hrf, latent_dim=FLAGS.latent_dim, use_z=variational)
+
                 ckpt_data = {
                     "model":     unet.state_dict(),
                     "ema_model": ema_model.state_dict(),
@@ -349,19 +350,15 @@ def train(argv):
                     os.path.join(ckptdir, f"{FLAGS.exp_name}_{FLAGS.model_type}_{FLAGS.dataset}_weights_step_{step}.pt"),
                 )
 
+            #Tensorboard scalars
             if tb_step > 0 and step % tb_step == 0:
                 writer.add_scalar("loss/total", loss, step)
                 if variational:
-                    writer.add_scalar("loss/recon",    recon_loss,      step)
-                    writer.add_scalar("loss/kl",       kl_loss,         step)  # reale, non clamped
-                    writer.add_scalar("loss/beta",     beta,            step)
-                    writer.add_scalar("vae/mu",        mu.mean(),       step)
-                    writer.add_scalar("vae/log_var",   log_var.mean(),  step)
-                    if step % (tb_step * 10) == 0:
-                        kl_dim_mean = kl_per_dim.mean(dim=0) 
-                        for i in range(kl_dim_mean.shape[0]):
-                            writer.add_scalar(f"kl_dim/{i}", kl_dim_mean[i].item(), step)
-
+                    writer.add_scalar("loss/recon",  recon_loss,     step)
+                    writer.add_scalar("loss/kl",     kl_loss,        step)
+                    writer.add_scalar("loss/beta",   beta,           step)
+                    writer.add_scalar("vae/mu",      mu.mean(),      step)
+                    writer.add_scalar("vae/log_var", log_var.mean(), step)
 
 
 if __name__ == "__main__":
