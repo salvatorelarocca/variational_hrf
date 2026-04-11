@@ -16,7 +16,7 @@ FLAGS = flags.FLAGS
 
 flags.DEFINE_string("generated_dir", None, "Cartella con le immagini generate (PNG/JPG).")
 flags.DEFINE_string("real_dir", None, "Cartella con le immagini reali su disco.")
-flags.DEFINE_string("dataset", None, "Dataset built-in da usare come riferimento reale (cifar10, cifar100, mnist, stl10).")
+flags.DEFINE_string("dataset", None, "Dataset built-in da usare come riferimento reale (cifar10, mnist).")
 flags.DEFINE_string("data_root", "./data", "Root directory per il download dei dataset built-in.")
 flags.DEFINE_integer("gpu", 0, "Indice GPU (-1 per CPU).")
 flags.DEFINE_integer("batch_size", 64, "Batch size per il caricamento delle immagini.")
@@ -35,20 +35,20 @@ BUILTIN_DATASETS = {
 
 
 class FolderDataset(Dataset):
-    """Carica tutte le immagini da una cartella (non ricorsivo)."""
+    """Carica tutte le immagini da una cartella quando il dataset non è built-in. Estende torch.utils.data.Dataset."""
 
     def __init__(self, folder: str, transform=None):
         self.paths = sorted(
             p for p in Path(folder).iterdir()
             if p.suffix.lower() in VALID_EXTENSIONS
-        )
+        ) #prendo i file della cartella con estensioni valide
         if not self.paths:
             raise FileNotFoundError(f"Nessuna immagine trovata in '{folder}'")
         self.transform = transform
 
     def __len__(self):
         return len(self.paths)
-
+    
     def __getitem__(self, idx):
         img = Image.open(self.paths[idx]).convert("RGB")
         if self.transform:
@@ -66,12 +66,12 @@ def make_uint8_transform(img_size=None):
     if img_size is not None:
         ops.append(T.Resize((img_size, img_size), interpolation=T.InterpolationMode.BILINEAR))
     ops += [
-        T.ToTensor(),
-        T.Lambda(lambda x: (x * 255).to(torch.uint8)),
+        T.ToTensor(), #[0, 1]
+        T.Lambda(lambda x: (x * 255).to(torch.uint8)), #[0, 255] uint8
     ]
     return T.Compose(ops)
 
-'''funzione per il caricamento del dataset reale, se si usa un dataset built-in invece di una cartella, nel nostro caso MNIST o CIFAR10'''
+'''funzione per il caricamento del dataset reale, se si usa un dataset built-in invece di una cartella, caso MNIST o CIFAR10'''
 def get_real_loader_from_dataset(dataset_name, data_root, n_samples, batch_size, num_workers, img_size=None):
     """Restituisce un DataLoader per il test-set del dataset indicato."""
     name = dataset_name.lower()
@@ -99,10 +99,7 @@ def get_real_loader_from_dataset(dataset_name, data_root, n_samples, batch_size,
             return img
 
     kwargs = dict(root=data_root, transform=transform, download=True)
-    if name == "stl10":
-        kwargs["split"] = "test"
-    else:
-        kwargs["train"] = False
+    kwargs["train"] = False
 
     base_ds = cls(**kwargs)
     wrapped = RGBWrapper(base_ds)

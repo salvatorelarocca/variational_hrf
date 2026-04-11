@@ -193,9 +193,9 @@ def eval(argv):
     generated_img = torch.cat(all_imgs, dim=0)
 
     if hrf:
-        file = f"hrf_{cfg['model_type']}_{FLAGS.integration_method}_nfe{FLAGS.N}x{FLAGS.M}.png"
+        file = f"hrf_{cfg['model_type']}_{FLAGS.checkpoint_step}_{FLAGS.integration_method}_nfe{FLAGS.N}x{FLAGS.M}.png"
     else:
-        file = f"rf_{FLAGS.integration_method}_nfe{FLAGS.M}.png"
+        file = f"rf_{FLAGS.checkpoint_step}_{FLAGS.integration_method}_nfe{FLAGS.M}.png"
 
     out_path = os.path.join(imgdir, file)
 

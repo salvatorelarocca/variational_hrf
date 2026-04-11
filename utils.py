@@ -92,10 +92,10 @@ def sample_hrf_euler(model, sample_shape, N, M, device, latent_dim=128, use_z=Tr
         t_values = torch.arange(N, device=device) / N
         tau_values = torch.arange(M, device=device) / M
         print("Sampling with z for HRF model...") if use_z else print("Sampling without z for HRF model...")
+        z = torch.randn(batchsize, latent_dim, device=device) if use_z else None #se lo campiono fuori è coerente con la traiettoria, se lo campiono dentro è incoerente ma più vario
         for i in range(N):
             t = t_values[i].expand(batchsize)
             vtau = torch.randn(sample_shape, device=device)
-            z = torch.randn(batchsize, latent_dim, device=device) if use_z else None #se lo campiono fuori è coerente con la traiettoria, se lo campiono dentro è incoerente ma più vario
             for j in range(M):
                 tau = tau_values[j].expand(batchsize)
                 a = model(tau, vtau, t, xt, z=z)

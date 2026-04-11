@@ -667,8 +667,8 @@ class UNetModel(nn.Module):
                         dims=dims,
                         use_checkpoint=use_checkpoint,
                         use_scale_shift_norm=use_scale_shift_norm,
-                        # use_latent=self.use_latent,
-                        # latent_dim=self.latent_dim
+                        use_latent=self.use_latent,
+                        latent_dim=self.latent_dim
                     )
                 ]
                 ch = int(model_channels * mult)
@@ -696,8 +696,8 @@ class UNetModel(nn.Module):
                             use_checkpoint=use_checkpoint,
                             use_scale_shift_norm=use_scale_shift_norm,
                             up=True,
-                            # use_latent=self.use_latent,
-                            # latent_dim=self.latent_dim
+                            use_latent=self.use_latent,
+                            latent_dim=self.latent_dim
                         )
                         if resblock_updown
                         else Upsample(ch, conv_resample, dims=dims, out_channels=out_ch)

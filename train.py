@@ -8,6 +8,7 @@ import torch
 from absl import app, flags
 from torch.utils import tensorboard
 from tqdm import trange
+from models import unet
 from vae.vae_model import BetaVAE
 
 from dataset import get_datalooper
@@ -92,21 +93,23 @@ def evaluate(unet, vae, val_datalooper, FM, device, beta, variational, hrf, n_va
                 tau, vtau, target = FM.sample_location_and_conditional_flow(v0, target)
                 if variational:
                     '''il vae prende in input partenza, arrivo, valori intermeti e tempo della velocità'''
-                    z, mu, log_var = vae(v0, target, vtau, tau) #v0, v1, vtau, tau z = q(z | start, target, state_t, time)
+                    z, mu, log_var = vae(v0, vtau, tau) #v0, v1, vtau, tau z = q(z | start, target, state_t, time)
                     '''quindi unet deve innestare z solo nei resblock della velocità?'''
                     pred = unet(tau, vtau, t, xt, z=z)
                 else:
                     pred = unet(tau, vtau, t, xt)
             else:
                 if variational:
-                    z, mu, log_var = vae(x0, target, xt, t) # uguale per hrf ma i parametri sono quelli spaziali
+                    z, mu, log_var = vae(x0, xt, t) # uguale per hrf ma i parametri sono quelli spaziali
                     pred = unet(t, xt, z=z)
                 else:
                     pred = unet(t, xt)
 
             if variational:
                 recon_loss = torch.mean((pred - target) ** 2)
-                kl_loss    = _kl_divergence(mu, log_var).mean()
+                kl_b_dim    = _kl_divergence(mu, log_var)
+                kl_per_sample = kl_b_dim.sum(dim=1)        # [B]
+                kl_loss    = kl_per_sample.mean()
                 loss       = recon_loss + kl_loss * beta
                 total_recon += recon_loss.item()
                 total_kl    += kl_loss.item()
@@ -213,7 +216,11 @@ def train(argv):
         vae_size = sum(p.data.nelement() for p in vae.parameters())
         print(f"VAE params: {vae_size} ({vae_size/1e6:.2f} M)")
         model_config["vae_params"] = vae_size
-        optim = torch.optim.Adam(list(unet.parameters()) + list(vae.parameters()), lr=FLAGS.lr)
+
+        optim = torch.optim.Adam([
+            {"params": unet.parameters(), "lr": FLAGS.lr}, #se si vuole avere diversi lr per unet e vae, si possono specificare qui
+            {"params": vae.parameters(), "lr": FLAGS.lr}
+        ])
     else:
         optim = torch.optim.Adam(unet.parameters(), lr=FLAGS.lr)
 
@@ -265,7 +272,7 @@ def train(argv):
                 tau, vtau, target = FM.sample_location_and_conditional_flow(v0, target)
                 if variational:
                     #HRF+VAE
-                    z, mu, log_var = vae(v0, target, vtau, tau)
+                    z, mu, log_var = vae(v0, vtau, tau)
                     pred = unet(tau, vtau, t, xt, z=z)
                 else:
                     #HRF
@@ -273,7 +280,7 @@ def train(argv):
             else:
                 if variational:
                     #RF+VAE
-                    z, mu, log_var = vae(x0, target, xt, t) 
+                    z, mu, log_var = vae(x0, xt, t) 
                     pred = unet(t, xt, z=z)
                 else:
                     #RF
@@ -282,9 +289,12 @@ def train(argv):
             if variational:
                 recon_loss = torch.mean((pred - target) ** 2)
                 kl_b_dim   = _kl_divergence(mu, log_var)   # [B, latent_dim]
-                kl_loss    = kl_b_dim.mean()
-                anneal = min(1.0, (step + 1) / (total_end_step * kl_warmup_frac))
-                loss       = recon_loss + kl_loss * anneal * beta
+                kl_per_sample = kl_b_dim.sum(dim=1)        # [B]
+                kl_loss    = kl_per_sample.mean()
+                '''beta alto il peso di kl aumenta e il modello ad abbassare KL (quindi a ignorare z) faccio prima ad azzerare
+                   beta basso la penalità KL pesa meno, quindi conviene usare z per migliorare la ricostruzione.'''
+                annealing_factor = min(1.0, (step + 1) / (total_end_step * kl_warmup_frac))
+                loss       = recon_loss + kl_loss * beta * annealing_factor
             else:
                 loss = torch.mean((pred - target) ** 2)
 
@@ -354,11 +364,11 @@ def train(argv):
             if tb_step > 0 and step % tb_step == 0:
                 writer.add_scalar("loss/total", loss, step)
                 if variational:
-                    writer.add_scalar("loss/recon",  recon_loss,     step)
-                    writer.add_scalar("loss/kl",     kl_loss,        step)
-                    writer.add_scalar("loss/beta",   beta,           step)
-                    writer.add_scalar("vae/mu",      mu.mean(),      step)
-                    writer.add_scalar("vae/log_var", log_var.mean(), step)
+                    writer.add_scalar("loss/recon",  recon_loss,                      step)
+                    writer.add_scalar("loss/kl",     kl_loss,                         step)
+                    writer.add_scalar("loss/beta",   beta*annealing_factor,           step)
+                    writer.add_scalar("vae/mu",      mu.mean(),                       step)
+                    writer.add_scalar("vae/log_var", log_var.mean(),                  step)
 
 
 if __name__ == "__main__":
