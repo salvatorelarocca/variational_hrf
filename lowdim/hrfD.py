@@ -16,6 +16,7 @@ from utils import LowDimData, VNetD
 @torch.no_grad()
 def sample_hierarchical(model, x_t, t, cur_depth, max_depth, N_list, return_traj=False):
     x_0 = x_t[:,cur_depth,...].clone()
+    N_list = list(map(int, FLAGS.N_list))
     local_num_steps = N_list[cur_depth]
     times = torch.linspace(0.0,1.0,local_num_steps+1,device=x_t.device)
     dts = torch.diff(times)
@@ -46,7 +47,7 @@ def train_hrf(data, depth, N_list, checkpoint, iterations, base_dir, seed, devic
     img_dir = os.path.join(base_dir, f"fig")
     os.makedirs(ckpt_dir, exist_ok=True)
     os.makedirs(img_dir, exist_ok=True)
-
+    N_list = list(map(int, FLAGS.N_list))
     loss_curve = []
 
     v_net = VNetD(data_dim=data.dim, depth=depth).to(device)
@@ -63,7 +64,7 @@ def train_hrf(data, depth, N_list, checkpoint, iterations, base_dir, seed, devic
         for train_i in range(iterations):
             optimizer.zero_grad()
             indices = torch.randperm(len(data.pairs))[:checkpoint['batchsize']]
-            batch = data.pairs[indices]
+            batch = data.pairs[indices] #rende randomico solo la scelta della coppia ma non la coppia stessa, che è fissa e questo rende il problema deterministico e più facile da imparare, come in hrfD originale
             x0 = batch[:, 0].detach().clone()   # N x d
             x1 = batch[:, 1].detach().clone()   # N x d
 
@@ -98,6 +99,19 @@ def train_hrf(data, depth, N_list, checkpoint, iterations, base_dir, seed, devic
                     distance = wasserstein_distance(data.x1[:, 0].cpu().numpy(), xt[:, 0].cpu().numpy())
                 else:
                     distance = ot.sliced_wasserstein_distance(xt, data.x1, seed=1)
+                
+                log_file = os.path.join(base_dir, "metrics.txt")
+
+                with open(log_file, "a") as f:
+                    f.write(
+                        f"\nstep={train_i+1} "
+                        f"Data_type={FLAGS.data_type} "
+                        f"WD={distance:.6f} "
+                        f"NFE={np.prod(N_list)} "
+                        f"N_list={N_list} "
+                        f"mode={FLAGS.mode}"
+                    )
+
                 print(f"{train_i+1} WD={distance} NFE={np.prod(N_list)} {N_list}")
                 
                 plt.figure()
@@ -160,22 +174,24 @@ def main(argv):
     os.makedirs(img_dir, exist_ok=True)
     os.makedirs(dist_dir, exist_ok=True)
     os.makedirs(traj_dir, exist_ok=True)
+    N_list = list(map(int, FLAGS.N_list))
 
     if FLAGS.mode == "train":
         # N_list = [100]
-        # N_list = [10,10]
-        N_list = [2,5,10]
+        # N_list = FLAGS.N_list
+        # N_list = [2,5,10]
         # N_list = [1,2,5,10]
         # N_list = [1,2,5,5,10]
         # N_list = [1,1,1,1,1,1,2,5,5,10]
+
         v_net = train_hrf(data, len(N_list), N_list, checkpoint, iterations, hrf_dir, seed, device, progress=True)
 
     elif FLAGS.mode == "eval":
         with torch.inference_mode():
-            N_list = [2,5,10]
+            # N_list = FLAGS.N_list
             depth = len(N_list)
             v_net = VNetD(data_dim=data.dim, depth=depth).to(device)
-            step = 50000
+            step = iterations
             ckpt_name = f'hrf_{step}_D{depth}_seed{seed}'
             v_net = load_ckpt(hrf_dir, data.dim, v_net, ckpt=ckpt_name+'.pt')
 
@@ -205,6 +221,17 @@ def main(argv):
                 plt.scatter(data.x1[:5000, 0].cpu().numpy(), data.x1[:5000, 1].cpu().numpy(), c="#ff7f0e", label="Target", alpha=0.25, s=3)
                 plt.scatter(xt[:5000,0].cpu().numpy(), xt[:5000,1].cpu().numpy(), c="#2ca02c", label=f'Gen SWD={distance:.3f}', alpha=0.25, s=3)
             
+            log_file = os.path.join(hrf_dir, "metrics.txt")
+
+            with open(log_file, "a") as f:
+                    f.write(
+                        f"\nWD={distance:.6f} "
+                        f"Data_type={FLAGS.data_type} "
+                        f"NFE={np.prod(N_list)} "
+                        f"N_list={N_list} "
+                        f"mode={FLAGS.mode}"
+                    )
+
             ax = plt.gca()
             ax.spines['top'].set_visible(False)
             ax.spines['right'].set_visible(False)
@@ -235,6 +262,7 @@ if __name__ == "__main__":
     flags.DEFINE_integer("gpu", 0, "GPU number")
     flags.DEFINE_integer("seed", 0, "random seed")
     flags.DEFINE_string("base_dir", "lowdim", "work dir")
+    flags.DEFINE_list("N_list", [10, 10], help="lista delle profondità")
     flags.DEFINE_enum("mode", None, ["train", "eval"], "running mode")
     
 

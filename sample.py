@@ -123,7 +123,8 @@ def eval(argv):
     load_model(unet, ckpt['ema_model'])
     unet.eval()
 
-    use_z     = cfg["variational"]
+    use_z = False
+    #use_z     = cfg["variational"]
     latent_dim = cfg["latent_dim"]
 
     num_samples = FLAGS.num_samples
