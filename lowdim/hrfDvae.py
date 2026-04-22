@@ -11,10 +11,10 @@ from scipy.stats import wasserstein_distance
 from tqdm import tqdm
 
 from utils import load_ckpt, plot_traj
-from utils import LowDimData, VNetD
+from utilsvae import LowDimData, VNetD, PosteriorEncoder
 
 @torch.no_grad()
-def sample_hierarchical(model, x_t, t, cur_depth, max_depth, N_list, return_traj=False):
+def sample_hierarchical(model, x_t, t, cur_depth, max_depth, N_list, return_traj=False, z=None):
     x_0 = x_t[:,cur_depth,...].clone()
     local_num_steps = N_list[cur_depth]
     times = torch.linspace(0.0,1.0,local_num_steps+1,device=x_t.device)
@@ -29,10 +29,10 @@ def sample_hierarchical(model, x_t, t, cur_depth, max_depth, N_list, return_traj
             x_0 = torch.randn_like(x_t[:,cur_depth,...],device=x_t.device)
             x_t[:,cur_depth,...] = x_0
         if cur_depth+1==max_depth:
-            f = model(x_t,t*torch.ones((x_t.shape[0],1),device=x_t.device))
+            f = model(x_t,t*torch.ones((x_t.shape[0],1),device=x_t.device), z=z)
             x_t[:,cur_depth,...] += dt*f
         else:
-            x_t[:,cur_depth,...] += dt*sample_hierarchical(model, x_t, t, cur_depth+1, max_depth, N_list)[1]
+            x_t[:,cur_depth,...] += dt*sample_hierarchical(model, x_t, t, cur_depth+1, max_depth, N_list, z=z)[1]
         if return_traj:
             traj.append(x_t[:,cur_depth,...].detach().clone())
     if return_traj:
@@ -50,7 +50,12 @@ def train_hrf(data, depth, N_list, checkpoint, iterations, base_dir, seed, devic
     loss_curve = []
 
     v_net = VNetD(data_dim=data.dim, depth=depth).to(device)
-    optimizer = torch.optim.AdamW(v_net.parameters(), lr=1e-3)
+    posterior = PosteriorEncoder(data_dim=data.dim).to(device)
+    optimizer = torch.optim.AdamW([
+        {"params": v_net.parameters(), "lr": 1e-3},
+        {"params": posterior.parameters(), "lr": 1e-3},  
+    ])
+
     # show model size
     model_size = 0
     for param in v_net.parameters():
@@ -71,16 +76,32 @@ def train_hrf(data, depth, N_list, checkpoint, iterations, base_dir, seed, devic
             t = torch.rand((x1.shape[0],depth)+(1,)*(x1.dim()-1), device=device)
 
             xt = (1-t)*x0 + t*(x1[:,None,...] - torch.einsum('ij,bj...->bi...', A, x0))
-            pred = v_net(xt, t.squeeze(list(range(2,t.dim()))))
+            # pred = v_net(xt, t.squeeze(list(range(2,t.dim())))) nel repo hanno due volte pred questa dovrebbe essere quella sostituita dalla seguente
             target = x1 - torch.sum(x0, dim=1) # N x d
 
-            pred = v_net(xt, t)
-            loss = torch.mean((target - pred) ** 2)
+            z, mu, log_var = posterior(
+                x0=x0[:, 0, :],        # (B, d) 
+                x1=x1,                 # (B, d)  
+                xt=xt[:, 0, :],        # (B, d) 
+                t=t.squeeze(-1)[:, 0], # (B,) - tempo più interno per essere compatibili con l'architettura UNET+VAE
+            )
+
+            pred = v_net(xt, t, z)
+            recons_loss = torch.mean((target - pred) ** 2)
+            kld_loss = torch.mean(
+                                     -0.5 * torch.sum(1 + log_var - mu**2 - log_var.exp(), dim=1),
+                                     dim=0
+            )
+            loss = recons_loss + FLAGS.beta * kld_loss
             loss.backward()
 
             optimizer.step()
             loss_curve.append(loss.item())
-            pbar.set_description(f'loss: {loss.item():.4f}')
+            pbar.set_description(
+                f'loss: {recons_loss.item():.4f} kld: {FLAGS.beta*kld_loss.item():.4f}',
+                f'mu:   {mu.mean().item():.4f} log_var: {log_var.mean().item():.4f}',
+                )
+
             pbar.update(1)
 
             if (train_i+1) % checkpoint['save_every_steps'] == 0 or train_i == (iterations-1):
@@ -93,13 +114,31 @@ def train_hrf(data, depth, N_list, checkpoint, iterations, base_dir, seed, devic
                 x0 = data.initial_model.sample([data.batchsize]).to(data.device).detach()
                 x0 = torch.cat([x0[:,None,:], torch.randn((x0.shape[0],depth-1)+x0.shape[1:],device=device)], dim=1)
                 t0 = torch.zeros(depth, device=device)
-                xt = sample_hierarchical(v_net, x0, t0, 0, depth, N_list)[1]
+                z = torch.randn((x0.shape[0], 8), device=device)  # Sample z from standard normal
+                xt = sample_hierarchical(v_net, x0, t0, 0, depth, N_list, z=z)[1]
                 if data.dim == 1:
                     distance = wasserstein_distance(data.x1[:, 0].cpu().numpy(), xt[:, 0].cpu().numpy())
                 else:
                     distance = ot.sliced_wasserstein_distance(xt, data.x1, seed=1)
                 print(f"{train_i+1} WD={distance} NFE={np.prod(N_list)} {N_list}")
                 
+                log_file = os.path.join(base_dir, "metrics.txt")
+
+                with open(log_file, "a") as f:
+                    f.write(
+                        f"\nstep={train_i+1} "
+                        f"Data_type={FLAGS.data_type} "
+                        f"WD={distance:.6f} "
+                        f"NFE={np.prod(N_list)} "
+                        f"N_list={N_list} "
+                        f"mode={FLAGS.mode}"
+                    )
+
+                print(
+                    f"step={train_i+1}  WD={distance:.6f}  "
+                    f"NFE={np.prod(N_list)}  {N_list}"
+                )
+
                 plt.figure()
                 if data.dim == 1:
                     bins = np.linspace(-2, 2, 201)
@@ -138,7 +177,7 @@ def main(argv):
     torch.backends.cudnn.benchmark = False
 
     iterations = FLAGS.iter
-    base_dir = os.path.join(FLAGS.base_dir, FLAGS.data_type)
+    base_dir = os.path.join(FLAGS.base_dir, f'{FLAGS.data_type}_vae')
     if FLAGS.gpu < 0:
         device = torch.device('cpu')
     else:
@@ -171,7 +210,7 @@ def main(argv):
 
     elif FLAGS.mode == "eval":
         with torch.inference_mode():
-            N_list = [2,5,10]
+            N_list = [2,5]
             depth = len(N_list)
             v_net = VNetD(data_dim=data.dim, depth=depth).to(device)
             step = 50000
@@ -187,6 +226,7 @@ def main(argv):
             x0_eval = data.initial_model.sample((data.batchsize,)).to(data.device).detach()
             x0 = torch.cat([x0_eval[:,None,:], torch.randn((x0_eval.shape[0],depth-1)+x0_eval.shape[1:],device=device)], dim=1)
             t0 = torch.zeros(depth, device=device)
+            z = torch.randn((x0.shape[0], 8), device=device)  # Sample z from standard normal    
             x0, xt, traj = sample_hierarchical(v_net, x0, t0, 0, depth, N_list, return_traj=True)
             if data.dim == 1:
                 distance = wasserstein_distance(data.x1[:, 0].cpu().numpy(), xt[:,0].cpu().numpy())
@@ -233,6 +273,8 @@ if __name__ == "__main__":
     flags.DEFINE_integer("iter", 50000, "training iterations")
     flags.DEFINE_integer("gpu", 0, "GPU number")
     flags.DEFINE_integer("seed", 0, "random seed")
+    flags.DEFINE_list("N_list", ["10", "10"], "N_list per sampling gerarchico, es. 10,10")
+    flags.DEFINE_float("beta", 1.0, "weight for KL divergence loss")
     flags.DEFINE_string("base_dir", "lowdim", "work dir")
     flags.DEFINE_enum("mode", None, ["train", "eval"], "running mode")
     

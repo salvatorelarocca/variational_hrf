@@ -47,8 +47,8 @@ class BetaVAE(nn.Module):
         self.proj_start  = nn.Linear(feat, 256)
         self.proj_state  = nn.Linear(feat, 256)
 
-        # Fusion: tutti e tre entrano direttamente + time
-        # 256*3 + time_embed_dim
+        # tutti e tre entrano + time
+        # 256*2 + time_embed_dim
         self.fusion = nn.Sequential(
             nn.Linear(256 * 2 + time_embed_dim, 512),
             nn.SiLU(),
@@ -59,7 +59,7 @@ class BetaVAE(nn.Module):
 
         self.fc_mu  = nn.Linear(512, latent_dim)
         self.fc_var = nn.Linear(512, latent_dim)
-        nn.init.zeros_(self.fc_var.bias)
+        # nn.init.zeros_(self.fc_var.bias)
 
     def encode(
         self,
@@ -72,11 +72,11 @@ class BetaVAE(nn.Module):
 
         t_emb = self.time_embed(time.unsqueeze(1))
 
-        # Tutti e tre entrano direttamente — nessuna info viene scartata
+        # concateno e passo fusione
         h = torch.cat([h_start, h_state, t_emb], dim=1)
         h = self.fusion(h)
 
-        mu      = self.fc_mu(h)
+        mu = self.fc_mu(h)
         log_var = torch.clamp(self.fc_var(h), -10, 10)
         return mu, log_var
 
