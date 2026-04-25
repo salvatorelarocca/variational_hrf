@@ -229,7 +229,7 @@ class LowDimData():
             raise NotImplementedError
 
 
-class VNet(torch.nn.Module):
+class VNet(torch.nn.Module): #questo non è un RF standard perché tratta la v 
     def __init__(self, data_dim=2, hidden_num=128):
         super().__init__()
         dim = self.dim = 32

@@ -1,7 +1,6 @@
 import os
-import time
-
-import copy
+import csv
+from datetime import datetime
 import matplotlib.pyplot as plt
 import numpy as np
 import ot
@@ -44,6 +43,8 @@ def sample_hierarchical(model, x_t, t, cur_depth, max_depth, N_list, return_traj
 def train_hrf(data, depth, N_list, checkpoint, iterations, base_dir, seed, device, progress):
     ckpt_dir = os.path.join(base_dir, f"ckpt")
     img_dir = os.path.join(base_dir, f"fig")
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    img_dir = os.path.join(img_dir, run_id)
     os.makedirs(ckpt_dir, exist_ok=True)
     os.makedirs(img_dir, exist_ok=True)
 
@@ -98,8 +99,23 @@ def train_hrf(data, depth, N_list, checkpoint, iterations, base_dir, seed, devic
                     distance = wasserstein_distance(data.x1[:, 0].cpu().numpy(), xt[:, 0].cpu().numpy())
                 else:
                     distance = ot.sliced_wasserstein_distance(xt, data.x1, seed=1)
-                print(f"{train_i+1} WD={distance} NFE={np.prod(N_list)} {N_list}")
+                print(f"{train_i+1} WD/SWD={distance} NFE={np.prod(N_list)} {N_list}")
                 
+                log_file = os.path.join(base_dir, "log.csv")
+
+                with open(log_file, "a", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow([
+                        FLAGS.mode,
+                        run_id,
+                        train_i + 1,
+                        FLAGS.data_type,
+                        distance,
+                        np.prod(N_list),
+                        str(N_list),      # oppure json.dumps(N_list)
+                        model_size
+                    ])
+
                 plt.figure()
                 if data.dim == 1:
                     bins = np.linspace(-2, 2, 201)
@@ -160,10 +176,12 @@ def main(argv):
     os.makedirs(dist_dir, exist_ok=True)
     os.makedirs(traj_dir, exist_ok=True)
 
+    N_list   = [int(x) for x in FLAGS.N_list]
+
     if FLAGS.mode == "train":
         # N_list = [100]
         # N_list = [10,10]
-        N_list = [2,5]
+        # N_list = [10,10]
         # N_list = [1,2,5,10]
         # N_list = [1,2,5,5,10]
         # N_list = [1,1,1,1,1,1,2,5,5,10]
@@ -171,7 +189,7 @@ def main(argv):
 
     elif FLAGS.mode == "eval":
         with torch.inference_mode():
-            N_list = [2,5,10]
+            # N_list = [2,5,10]
             depth = len(N_list)
             v_net = VNetD(data_dim=data.dim, depth=depth).to(device)
             step = 50000
@@ -233,6 +251,7 @@ if __name__ == "__main__":
     flags.DEFINE_integer("iter", 50000, "training iterations")
     flags.DEFINE_integer("gpu", 0, "GPU number")
     flags.DEFINE_integer("seed", 0, "random seed")
+    flags.DEFINE_list("N_list", ["10", "10"], "N_list per sampling gerarchico, es. 10,10")
     flags.DEFINE_string("base_dir", "lowdim", "work dir")
     flags.DEFINE_enum("mode", None, ["train", "eval"], "running mode")
     

@@ -1,7 +1,7 @@
 import os
-import time
+from datetime import datetime
 
-import copy
+import csv
 import matplotlib.pyplot as plt
 import numpy as np
 import ot
@@ -10,7 +10,7 @@ from absl import app, flags
 from scipy.stats import wasserstein_distance
 from tqdm import tqdm
 
-from utils import load_ckpt, plot_traj
+from utilsvae import load_ckpt, plot_traj
 from utilsvae import LowDimData, VNetD, PosteriorEncoder
 
 @torch.no_grad()
@@ -29,10 +29,10 @@ def sample_hierarchical(model, x_t, t, cur_depth, max_depth, N_list, return_traj
             x_0 = torch.randn_like(x_t[:,cur_depth,...],device=x_t.device)
             x_t[:,cur_depth,...] = x_0
         if cur_depth+1==max_depth:
-            f = model(x_t,t*torch.ones((x_t.shape[0],1),device=x_t.device), z=z)
+            f = model(x_t,t*torch.ones((x_t.shape[0],1),device=x_t.device), z=z) #innesto z per VAE
             x_t[:,cur_depth,...] += dt*f
         else:
-            x_t[:,cur_depth,...] += dt*sample_hierarchical(model, x_t, t, cur_depth+1, max_depth, N_list, z=z)[1]
+            x_t[:,cur_depth,...] += dt*sample_hierarchical(model, x_t, t, cur_depth+1, max_depth, N_list, z=z)[1] #innesto nella chiamata ricorsiva
         if return_traj:
             traj.append(x_t[:,cur_depth,...].detach().clone())
     if return_traj:
@@ -44,24 +44,34 @@ def sample_hierarchical(model, x_t, t, cur_depth, max_depth, N_list, return_traj
 def train_hrf(data, depth, N_list, checkpoint, iterations, base_dir, seed, device, progress):
     ckpt_dir = os.path.join(base_dir, f"ckpt")
     img_dir = os.path.join(base_dir, f"fig")
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    img_dir = os.path.join(img_dir, run_id)
     os.makedirs(ckpt_dir, exist_ok=True)
     os.makedirs(img_dir, exist_ok=True)
 
     loss_curve = []
+    recons_loss_curve = []
+    kld_loss_curve = []
 
     v_net = VNetD(data_dim=data.dim, depth=depth).to(device)
-    posterior = PosteriorEncoder(data_dim=data.dim).to(device)
+    posterior = PosteriorEncoder(data_dim=data.dim, latent_dim=FLAGS.latent_dim).to(device)
     optimizer = torch.optim.AdamW([
         {"params": v_net.parameters(), "lr": 1e-3},
         {"params": posterior.parameters(), "lr": 1e-3},  
     ])
 
-    # show model size
+    # Stampa del numero dei parametri dei due modelli decoder e posterior encoder
     model_size = 0
+    model_vae_size = 0
     for param in v_net.parameters():
         model_size += param.data.nelement()
     print(f"Model params number: {model_size}")
     print("Model params: %.2f M" % (model_size / 1000 / 1000))
+
+    for param in posterior.parameters():
+        model_vae_size += param.data.nelement()
+    print(f"Posterior Encoder params number: {model_vae_size}")
+    print("Posterior Encoder params: %.2f M" % (model_vae_size / 1000 / 1000))
 
     A = torch.tril(torch.ones((depth, depth),device=device),diagonal=-1)
     with tqdm(initial=0,total=iterations) as pbar:
@@ -83,7 +93,7 @@ def train_hrf(data, depth, N_list, checkpoint, iterations, base_dir, seed, devic
                 x0=x0[:, 0, :],        # (B, d) 
                 x1=x1,                 # (B, d)  
                 xt=xt[:, 0, :],        # (B, d) 
-                t=t.squeeze(-1)[:, 0], # (B,) - tempo più interno per essere compatibili con l'architettura UNET+VAE
+                t=t.squeeze(-1)[:, 0], # (B,) 
             )
 
             pred = v_net(xt, t, z)
@@ -97,24 +107,28 @@ def train_hrf(data, depth, N_list, checkpoint, iterations, base_dir, seed, devic
 
             optimizer.step()
             loss_curve.append(loss.item())
+            recons_loss_curve.append(recons_loss.item())
+            kld_loss_curve.append(kld_loss.item())
+
             pbar.set_description(
-                f'loss: {recons_loss.item():.4f} kld: {FLAGS.beta*kld_loss.item():.4f}',
-                f'mu:   {mu.mean().item():.4f} log_var: {log_var.mean().item():.4f}',
+                f'rec_loss: {recons_loss.item():.4f} kld: {FLAGS.beta*kld_loss.item():.4f}',
                 )
 
             pbar.update(1)
 
             if (train_i+1) % checkpoint['save_every_steps'] == 0 or train_i == (iterations-1):
                 checkpoint['v_net_state_dict'] = v_net.state_dict()
+                checkpoint['posterior_state_dict'] = posterior.state_dict()
                 checkpoint['optimizer_state_dict'] = optimizer.state_dict()
                 checkpoint['step'] = (train_i+1)
-                torch.save(checkpoint, os.path.join(ckpt_dir, f"hrf_{train_i+1}_D{depth}_seed{seed}.pt"))
+                torch.save(checkpoint, os.path.join(ckpt_dir, f"hrfvae_{train_i+1}_D{depth}_seed{seed}.pt"))
+
                 
                 v_net.eval()
                 x0 = data.initial_model.sample([data.batchsize]).to(data.device).detach()
                 x0 = torch.cat([x0[:,None,:], torch.randn((x0.shape[0],depth-1)+x0.shape[1:],device=device)], dim=1)
                 t0 = torch.zeros(depth, device=device)
-                z = torch.randn((x0.shape[0], 8), device=device)  # Sample z from standard normal
+                z = torch.randn((x0.shape[0], FLAGS.latent_dim), device=device)  # Sample z from standard normal
                 xt = sample_hierarchical(v_net, x0, t0, 0, depth, N_list, z=z)[1]
                 if data.dim == 1:
                     distance = wasserstein_distance(data.x1[:, 0].cpu().numpy(), xt[:, 0].cpu().numpy())
@@ -122,20 +136,27 @@ def train_hrf(data, depth, N_list, checkpoint, iterations, base_dir, seed, devic
                     distance = ot.sliced_wasserstein_distance(xt, data.x1, seed=1)
                 print(f"{train_i+1} WD={distance} NFE={np.prod(N_list)} {N_list}")
                 
-                log_file = os.path.join(base_dir, "metrics.txt")
+                log_file = os.path.join(base_dir, "log_train_mode.csv")
 
-                with open(log_file, "a") as f:
-                    f.write(
-                        f"\nstep={train_i+1} "
-                        f"Data_type={FLAGS.data_type} "
-                        f"WD={distance:.6f} "
-                        f"NFE={np.prod(N_list)} "
-                        f"N_list={N_list} "
-                        f"mode={FLAGS.mode}"
-                    )
+                with open(log_file, "a", newline="") as f:
+                    writer = csv.writer(f)
+
+                    writer.writerow([
+                        FLAGS.mode,
+                        run_id,
+                        train_i + 1,
+                        FLAGS.data_type,
+                        f"{distance:.6f}",
+                        np.prod(N_list),
+                        str(N_list),  # meglio json.dumps(N_list) se poi lo rileggi
+                        FLAGS.beta,
+                        FLAGS.latent_dim,
+                        model_size,
+                        model_vae_size
+                    ])
 
                 print(
-                    f"step={train_i+1}  WD={distance:.6f}  "
+                    f"step={train_i+1}  WD/SWD={distance:.6f}  "
                     f"NFE={np.prod(N_list)}  {N_list}"
                 )
 
@@ -162,8 +183,33 @@ def train_hrf(data, depth, N_list, checkpoint, iterations, base_dir, seed, devic
                 plt.title('Training Loss Curve')
                 plt.savefig(os.path.join(img_dir, "total_loss.png"))
                 plt.close()
+
+                plt.figure()
+
+                plt.plot(loss_curve, label="total")
+                plt.plot(recons_loss_curve, label="recon")
+                plt.plot(kld_loss_curve, label="kl")
+                plt.legend()
+                plt.title('Training Loss Curve')
+                plt.tight_layout()
+                plt.savefig(os.path.join(img_dir, "loss_total.png"))
+                plt.close()
+
+                plt.figure()
+                plt.plot(recons_loss_curve)
+                plt.title('Reconstruction Loss')
+                plt.tight_layout()
+                plt.savefig(os.path.join(img_dir, "loss_reconstruction.png"))
+                plt.close()
+
+                plt.figure()
+                plt.plot(kld_loss_curve)
+                plt.title('KL Divergence Loss')
+                plt.tight_layout()
+                plt.savefig(os.path.join(img_dir, "loss_kl.png"))
+                plt.close()
                 
-    return v_net
+    return v_net, posterior
 
 
 def main(argv):
@@ -191,31 +237,35 @@ def main(argv):
         'step': 0,
         'batchsize': FLAGS.batchsize,
     }
-    hrf_dir = os.path.join(base_dir, "hrfD")
-    img_dir = os.path.join(hrf_dir, f"fig")
+    hrf_dir = os.path.join(base_dir, "hrfD_vae")
+    img_dir = os.path.join(hrf_dir, "fig")
     dist_dir = os.path.join(img_dir, "dist")
     traj_dir = os.path.join(img_dir, "traj")
     os.makedirs(img_dir, exist_ok=True)
     os.makedirs(dist_dir, exist_ok=True)
     os.makedirs(traj_dir, exist_ok=True)
 
+    N_list   = [int(x) for x in FLAGS.N_list]
+    
     if FLAGS.mode == "train":
         # N_list = [100]
         # N_list = [10,10]
-        N_list = [2,5]
+        # N_list = [2,5]
         # N_list = [1,2,5,10]
         # N_list = [1,2,5,5,10]
         # N_list = [1,1,1,1,1,1,2,5,5,10]
-        v_net = train_hrf(data, len(N_list), N_list, checkpoint, iterations, hrf_dir, seed, device, progress=True)
+        v_net, _ = train_hrf(data, len(N_list), N_list, checkpoint, iterations, hrf_dir, seed, device, progress=True)
 
     elif FLAGS.mode == "eval":
         with torch.inference_mode():
-            N_list = [2,5]
+            # N_list = [2,5]
             depth = len(N_list)
+            step = FLAGS.eval_step
+
             v_net = VNetD(data_dim=data.dim, depth=depth).to(device)
-            step = 50000
-            ckpt_name = f'hrf_{step}_D{depth}_seed{seed}'
+            ckpt_name = f'hrfvae_{step}_D{depth}_seed{seed}'
             v_net = load_ckpt(hrf_dir, data.dim, v_net, ckpt=ckpt_name+'.pt')
+            # non serve caricare il posterior nella face di sampling perché si campiona z dalla normale standard
 
             model_size = 0
             for param in v_net.parameters():
@@ -223,16 +273,35 @@ def main(argv):
             print(f"Model params number: {model_size}")
             print("Model params: %.2f M" % (model_size / 1000 / 1000))
 
+            
             x0_eval = data.initial_model.sample((data.batchsize,)).to(data.device).detach()
             x0 = torch.cat([x0_eval[:,None,:], torch.randn((x0_eval.shape[0],depth-1)+x0_eval.shape[1:],device=device)], dim=1)
             t0 = torch.zeros(depth, device=device)
-            z = torch.randn((x0.shape[0], 8), device=device)  # Sample z from standard normal    
-            x0, xt, traj = sample_hierarchical(v_net, x0, t0, 0, depth, N_list, return_traj=True)
+            z = torch.randn((x0.shape[0], FLAGS.latent_dim), device=device)  # Sample z from standard normal    
+            x0, xt, traj = sample_hierarchical(v_net, x0, t0, 0, depth, N_list, return_traj=True, z=z)
             if data.dim == 1:
                 distance = wasserstein_distance(data.x1[:, 0].cpu().numpy(), xt[:,0].cpu().numpy())
             else:
                 distance = ot.sliced_wasserstein_distance(data.x1, xt, seed=1)
             plot_traj(traj, distance, traj_dir, file_name=f"traj_{ckpt_name}_{N_list}.png", title=f'Trajectory with {N_list} Sampling Steps')
+
+            log_file = os.path.join(base_dir, "log_eval_mode.csv")
+
+            with open(log_file, "a") as f:
+                f.write(                    f"mode={FLAGS.mode} "
+                    f"Data_type={FLAGS.data_type} "
+                    f"WD/SWD={distance:.6f} "
+                    f"NFE={np.prod(N_list)} "
+                    f"N_list={N_list} "
+                    f"beta={FLAGS.beta} "
+                    f"latent_dim={FLAGS.latent_dim} "
+                    f"model_size={model_size}\n"
+                )
+
+                print(
+                    f"WD/SWD={distance:.6f}  "
+                    f"NFE={np.prod(N_list)}  {N_list}"
+                )
 
             plt.figure()
             if data.dim == 1:
@@ -271,12 +340,14 @@ if __name__ == "__main__":
     flags.DEFINE_enum("data_type", None, ["1to2", "1to5", "2D1to6", "moon", "3to3", "scurve", "2to2", "tree"], "data type")
     flags.DEFINE_integer("batchsize", 5000, "batch size")
     flags.DEFINE_integer("iter", 50000, "training iterations")
+    flags.DEFINE_integer("latent_dim", 8, "latent dimension for VAE")
     flags.DEFINE_integer("gpu", 0, "GPU number")
     flags.DEFINE_integer("seed", 0, "random seed")
     flags.DEFINE_list("N_list", ["10", "10"], "N_list per sampling gerarchico, es. 10,10")
     flags.DEFINE_float("beta", 1.0, "weight for KL divergence loss")
     flags.DEFINE_string("base_dir", "lowdim", "work dir")
     flags.DEFINE_enum("mode", None, ["train", "eval"], "running mode")
+    flags.DEFINE_integer("eval_step", 50000, "checkpoint step to evaluate")
     
 
     app.run(main)

@@ -4,11 +4,11 @@ import os
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from scipy.stats import wasserstein_distance
+
 from torch.distributions import Categorical
 from torch.distributions.multivariate_normal import MultivariateNormal
 from torch.distributions.mixture_same_family import MixtureSameFamily
-from tqdm import tqdm
+
 
 
 class SinusoidalPosEmb(torch.nn.Module):
