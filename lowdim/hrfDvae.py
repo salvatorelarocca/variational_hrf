@@ -44,8 +44,8 @@ def sample_hierarchical(model, x_t, t, cur_depth, max_depth, N_list, return_traj
 def train_hrf(data, depth, N_list, checkpoint, iterations, base_dir, seed, device, progress):
     ckpt_dir = os.path.join(base_dir, f"ckpt")
     img_dir = os.path.join(base_dir, f"fig")
-    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    img_dir = os.path.join(img_dir, run_id)
+    exp_name = FLAGS.exp_name
+    img_dir = os.path.join(img_dir, exp_name)
     os.makedirs(ckpt_dir, exist_ok=True)
     os.makedirs(img_dir, exist_ok=True)
 
@@ -53,7 +53,7 @@ def train_hrf(data, depth, N_list, checkpoint, iterations, base_dir, seed, devic
     recons_loss_curve = []
     kld_loss_curve = []
 
-    v_net = VNetD(data_dim=data.dim, depth=depth).to(device)
+    v_net = VNetD(data_dim=data.dim, depth=depth, latent_dim=FLAGS.latent_dim).to(device)
     posterior = PosteriorEncoder(data_dim=data.dim, latent_dim=FLAGS.latent_dim).to(device)
     optimizer = torch.optim.AdamW([
         {"params": v_net.parameters(), "lr": 1e-3},
@@ -143,7 +143,7 @@ def train_hrf(data, depth, N_list, checkpoint, iterations, base_dir, seed, devic
 
                     writer.writerow([
                         FLAGS.mode,
-                        run_id,
+                        FLAGS.exp_name,
                         train_i + 1,
                         FLAGS.data_type,
                         f"{distance:.6f}",
@@ -238,6 +238,7 @@ def main(argv):
         'batchsize': FLAGS.batchsize,
     }
     hrf_dir = os.path.join(base_dir, "hrfD_vae")
+    exp_path = os.path.join(hrf_dir, f"{FLAGS.exp_name}")
     img_dir = os.path.join(hrf_dir, "fig")
     dist_dir = os.path.join(img_dir, "dist")
     traj_dir = os.path.join(img_dir, "traj")
@@ -288,7 +289,8 @@ def main(argv):
             log_file = os.path.join(base_dir, "log_eval_mode.csv")
 
             with open(log_file, "a") as f:
-                f.write(                    f"mode={FLAGS.mode} "
+                f.write(                   
+                    f"mode={FLAGS.mode} "
                     f"Data_type={FLAGS.data_type} "
                     f"WD/SWD={distance:.6f} "
                     f"NFE={np.prod(N_list)} "
@@ -340,7 +342,7 @@ if __name__ == "__main__":
     flags.DEFINE_enum("data_type", None, ["1to2", "1to5", "2D1to6", "moon", "3to3", "scurve", "2to2", "tree"], "data type")
     flags.DEFINE_integer("batchsize", 5000, "batch size")
     flags.DEFINE_integer("iter", 50000, "training iterations")
-    flags.DEFINE_integer("latent_dim", 8, "latent dimension for VAE")
+    flags.DEFINE_integer("latent_dim", 4, "latent dimension for VAE")
     flags.DEFINE_integer("gpu", 0, "GPU number")
     flags.DEFINE_integer("seed", 0, "random seed")
     flags.DEFINE_list("N_list", ["10", "10"], "N_list per sampling gerarchico, es. 10,10")
@@ -348,6 +350,7 @@ if __name__ == "__main__":
     flags.DEFINE_string("base_dir", "lowdim", "work dir")
     flags.DEFINE_enum("mode", None, ["train", "eval"], "running mode")
     flags.DEFINE_integer("eval_step", 50000, "checkpoint step to evaluate")
+    flags.DEFINE_string("exp_name", "default_exp", "experiment name for logging and saving")
     
 
     app.run(main)

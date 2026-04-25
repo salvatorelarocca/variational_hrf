@@ -43,8 +43,8 @@ def sample_hierarchical(model, x_t, t, cur_depth, max_depth, N_list, return_traj
 def train_hrf(data, depth, N_list, checkpoint, iterations, base_dir, seed, device, progress):
     ckpt_dir = os.path.join(base_dir, f"ckpt")
     img_dir = os.path.join(base_dir, f"fig")
-    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    img_dir = os.path.join(img_dir, run_id)
+    exp_name = FLAGS.exp_name
+    img_dir = os.path.join(img_dir, exp_name)
     os.makedirs(ckpt_dir, exist_ok=True)
     os.makedirs(img_dir, exist_ok=True)
 
@@ -107,7 +107,7 @@ def train_hrf(data, depth, N_list, checkpoint, iterations, base_dir, seed, devic
                     writer = csv.writer(f)
                     writer.writerow([
                         FLAGS.mode,
-                        run_id,
+                        FLAGS.exp_name,
                         train_i + 1,
                         FLAGS.data_type,
                         distance,
@@ -192,7 +192,7 @@ def main(argv):
             # N_list = [2,5,10]
             depth = len(N_list)
             v_net = VNetD(data_dim=data.dim, depth=depth).to(device)
-            step = 50000
+            step = FLAGS.eval_step
             ckpt_name = f'hrf_{step}_D{depth}_seed{seed}'
             v_net = load_ckpt(hrf_dir, data.dim, v_net, ckpt=ckpt_name+'.pt')
 
@@ -247,13 +247,15 @@ def main(argv):
 if __name__ == "__main__":
     FLAGS = flags.FLAGS
     flags.DEFINE_enum("data_type", None, ["1to2", "1to5", "2D1to6", "moon", "3to3", "scurve", "2to2", "tree"], "data type")
-    flags.DEFINE_integer("batchsize", 5000, "batch size")
+    flags.DEFINE_integer("batchsize", 1000, "batch size")
     flags.DEFINE_integer("iter", 50000, "training iterations")
     flags.DEFINE_integer("gpu", 0, "GPU number")
     flags.DEFINE_integer("seed", 0, "random seed")
     flags.DEFINE_list("N_list", ["10", "10"], "N_list per sampling gerarchico, es. 10,10")
     flags.DEFINE_string("base_dir", "lowdim", "work dir")
     flags.DEFINE_enum("mode", None, ["train", "eval"], "running mode")
+    flags.DEFINE_integer("eval_step", 20000, "checkpoint step to evaluate")
+    flags.DEFINE_string("exp_name", "default_exp", "experiment name for logging and saving")
     
 
     app.run(main)
