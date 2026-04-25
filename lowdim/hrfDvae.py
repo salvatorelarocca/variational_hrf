@@ -44,8 +44,6 @@ def sample_hierarchical(model, x_t, t, cur_depth, max_depth, N_list, return_traj
 def train_hrf(data, depth, N_list, checkpoint, iterations, base_dir, seed, device, progress):
     ckpt_dir = os.path.join(base_dir, f"ckpt")
     img_dir = os.path.join(base_dir, f"fig")
-    exp_name = FLAGS.exp_name
-    img_dir = os.path.join(img_dir, exp_name)
     os.makedirs(ckpt_dir, exist_ok=True)
     os.makedirs(img_dir, exist_ok=True)
 
@@ -82,13 +80,16 @@ def train_hrf(data, depth, N_list, checkpoint, iterations, base_dir, seed, devic
             x0 = batch[:, 0].detach().clone()   # N x d
             x1 = batch[:, 1].detach().clone()   # N x d
 
-            x0 = torch.cat([x0[:,None,:], torch.randn((x0.shape[0],depth-1)+x0.shape[1:],device=device)], dim=1)   # N x D x d
+            print(f"x0.shape: {x0.shape}, x1.shape: {x1.shape}")
+
+            x0 = torch.cat([x0[:,None,:], torch.randn((x0.shape[0],depth-1)+x0.shape[1:],device=device)], dim=1)   # Batch x Depth x dimdata
+
             t = torch.rand((x1.shape[0],depth)+(1,)*(x1.dim()-1), device=device)
 
             xt = (1-t)*x0 + t*(x1[:,None,...] - torch.einsum('ij,bj...->bi...', A, x0))
             # pred = v_net(xt, t.squeeze(list(range(2,t.dim())))) nel repo hanno due volte pred questa dovrebbe essere quella sostituita dalla seguente
             target = x1 - torch.sum(x0, dim=1) # N x d
-
+            
             z, mu, log_var = posterior(
                 x0=x0[:, 0, :],        # (B, d) 
                 x1=x1,                 # (B, d)  
@@ -143,7 +144,6 @@ def train_hrf(data, depth, N_list, checkpoint, iterations, base_dir, seed, devic
 
                     writer.writerow([
                         FLAGS.mode,
-                        FLAGS.exp_name,
                         train_i + 1,
                         FLAGS.data_type,
                         f"{distance:.6f}",
@@ -238,7 +238,6 @@ def main(argv):
         'batchsize': FLAGS.batchsize,
     }
     hrf_dir = os.path.join(base_dir, "hrfD_vae")
-    exp_path = os.path.join(hrf_dir, f"{FLAGS.exp_name}")
     img_dir = os.path.join(hrf_dir, "fig")
     dist_dir = os.path.join(img_dir, "dist")
     traj_dir = os.path.join(img_dir, "traj")
@@ -263,7 +262,7 @@ def main(argv):
             depth = len(N_list)
             step = FLAGS.eval_step
 
-            v_net = VNetD(data_dim=data.dim, depth=depth).to(device)
+            v_net = VNetD(data_dim=data.dim, depth=depth, latent_dim=FLAGS.latent_dim).to(device)
             ckpt_name = f'hrfvae_{step}_D{depth}_seed{seed}'
             v_net = load_ckpt(hrf_dir, data.dim, v_net, ckpt=ckpt_name+'.pt')
             # non serve caricare il posterior nella face di sampling perché si campiona z dalla normale standard
@@ -286,19 +285,21 @@ def main(argv):
                 distance = ot.sliced_wasserstein_distance(data.x1, xt, seed=1)
             plot_traj(traj, distance, traj_dir, file_name=f"traj_{ckpt_name}_{N_list}.png", title=f'Trajectory with {N_list} Sampling Steps')
 
-            log_file = os.path.join(base_dir, "log_eval_mode.csv")
+            log_file = os.path.join(hrf_dir, "log_eval_mode.csv")
 
-            with open(log_file, "a") as f:
-                f.write(                   
-                    f"mode={FLAGS.mode} "
-                    f"Data_type={FLAGS.data_type} "
-                    f"WD/SWD={distance:.6f} "
-                    f"NFE={np.prod(N_list)} "
-                    f"N_list={N_list} "
-                    f"beta={FLAGS.beta} "
-                    f"latent_dim={FLAGS.latent_dim} "
-                    f"model_size={model_size}\n"
-                )
+            with open(log_file, "a", newline="") as f:
+                writer = csv.writer(f)
+
+                writer.writerow([
+                    FLAGS.mode,
+                    FLAGS.data_type,
+                    f"{distance:.6f}",
+                    np.prod(N_list),
+                    str(N_list),  
+                    FLAGS.beta,
+                    FLAGS.latent_dim,
+                    model_size,
+                ])
 
                 print(
                     f"WD/SWD={distance:.6f}  "
@@ -350,7 +351,6 @@ if __name__ == "__main__":
     flags.DEFINE_string("base_dir", "lowdim", "work dir")
     flags.DEFINE_enum("mode", None, ["train", "eval"], "running mode")
     flags.DEFINE_integer("eval_step", 50000, "checkpoint step to evaluate")
-    flags.DEFINE_string("exp_name", "default_exp", "experiment name for logging and saving")
     
 
     app.run(main)

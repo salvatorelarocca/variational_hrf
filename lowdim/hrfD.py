@@ -43,8 +43,6 @@ def sample_hierarchical(model, x_t, t, cur_depth, max_depth, N_list, return_traj
 def train_hrf(data, depth, N_list, checkpoint, iterations, base_dir, seed, device, progress):
     ckpt_dir = os.path.join(base_dir, f"ckpt")
     img_dir = os.path.join(base_dir, f"fig")
-    exp_name = FLAGS.exp_name
-    img_dir = os.path.join(img_dir, exp_name)
     os.makedirs(ckpt_dir, exist_ok=True)
     os.makedirs(img_dir, exist_ok=True)
 
@@ -101,18 +99,17 @@ def train_hrf(data, depth, N_list, checkpoint, iterations, base_dir, seed, devic
                     distance = ot.sliced_wasserstein_distance(xt, data.x1, seed=1)
                 print(f"{train_i+1} WD/SWD={distance} NFE={np.prod(N_list)} {N_list}")
                 
-                log_file = os.path.join(base_dir, "log.csv")
+                log_file = os.path.join(base_dir, "log_train_mode.csv")
 
                 with open(log_file, "a", newline="") as f:
                     writer = csv.writer(f)
                     writer.writerow([
                         FLAGS.mode,
-                        FLAGS.exp_name,
                         train_i + 1,
                         FLAGS.data_type,
-                        distance,
+                        f"{distance:.6f}",
                         np.prod(N_list),
-                        str(N_list),      # oppure json.dumps(N_list)
+                        str(N_list),      
                         model_size
                     ])
 
@@ -212,6 +209,25 @@ def main(argv):
                 distance = ot.sliced_wasserstein_distance(data.x1, xt, seed=1)
             plot_traj(traj, distance, traj_dir, file_name=f"traj_{ckpt_name}_{N_list}.png", title=f'Trajectory with {N_list} Sampling Steps')
 
+            log_file = os.path.join(hrf_dir, "log_eval_mode.csv")
+
+            with open(log_file, "a", newline="") as f:
+                writer = csv.writer(f)
+
+                writer.writerow([
+                    FLAGS.mode,
+                    FLAGS.data_type,
+                    f"{distance:.6f}",
+                    np.prod(N_list),
+                    str(N_list),  
+                    model_size,
+                ])
+
+                print(
+                    f"WD/SWD={distance:.6f}  "
+                    f"NFE={np.prod(N_list)}  {N_list}"
+                )
+
             plt.figure()
             if data.dim == 1:
                 bins = np.linspace(-2, 2, 201)
@@ -255,7 +271,6 @@ if __name__ == "__main__":
     flags.DEFINE_string("base_dir", "lowdim", "work dir")
     flags.DEFINE_enum("mode", None, ["train", "eval"], "running mode")
     flags.DEFINE_integer("eval_step", 20000, "checkpoint step to evaluate")
-    flags.DEFINE_string("exp_name", "default_exp", "experiment name for logging and saving")
     
 
     app.run(main)

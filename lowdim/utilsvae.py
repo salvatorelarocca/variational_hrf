@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from scipy.stats import wasserstein_distance
+from torch import nn
 from torch.distributions import Categorical
 from torch.distributions.multivariate_normal import MultivariateNormal
 from torch.distributions.mixture_same_family import MixtureSameFamily
@@ -32,6 +33,7 @@ class SinusoidalPosEmb(torch.nn.Module):
             assert(False)
         emb = torch.cat((emb.sin(),emb.cos()),dim=-1)
         return emb
+
 
 
 def load_ckpt(rf_dir, dim, model, ckpt=None):
@@ -351,34 +353,27 @@ class VNetD(torch.nn.Module):
 
         return x
     
-class SingleEncoder(torch.nn.Module):
+class SingleEncoder(nn.Module):
     def __init__(self, in_dim, emb_dim=64):
         super().__init__()
-        self.pos = SinusoidalPosEmb(emb_dim)
-        self.mlp = torch.nn.Sequential(
-            torch.nn.Linear(emb_dim, emb_dim),
-            torch.nn.GELU(),
-            torch.nn.Linear(emb_dim, emb_dim),
-            torch.nn.GELU(),
+        self.proj = nn.Linear(in_dim, emb_dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(emb_dim, emb_dim),
+            nn.GELU(),
+            nn.Linear(emb_dim, emb_dim),
+            nn.GELU(),
         )
 
-        self.proj = torch.nn.Linear(in_dim, emb_dim)
-
     def forward(self, x):
-        # x: (B, d) oppure (B,)
         if x.dim() == 1:
-            x = x.unsqueeze(1)
-
-        x = self.proj(x)              
-        x = x.mean(dim=1)          
-
-        x = self.pos(x)
-        return self.mlp(x)
+            x = x.unsqueeze(-1)
+        x = self.proj(x)   # (B,64)
+        return self.mlp(x) # (B,64)
 
 
 class PosteriorEncoder(torch.nn.Module):
     def __init__(self, data_dim, latent_dim=8,
-                 emb_dim=64, hidden_latent_dim=128):
+                 emb_dim=64):
         super().__init__()
 
         self.enc_x0 = SingleEncoder(data_dim, emb_dim)
@@ -388,16 +383,16 @@ class PosteriorEncoder(torch.nn.Module):
         
 
         self.mlp = torch.nn.Sequential(
-            torch.nn.Linear(emb_dim * 4, hidden_latent_dim),
+            torch.nn.Linear(emb_dim * 4, emb_dim),
             torch.nn.GELU(),
-            torch.nn.Linear(hidden_latent_dim, hidden_latent_dim),
+            torch.nn.Linear(emb_dim, emb_dim),
             torch.nn.GELU(),
-            torch.nn.Linear(hidden_latent_dim, hidden_latent_dim),
+            torch.nn.Linear(emb_dim, emb_dim),
             torch.nn.GELU(),
         )
 
-        self.fc_mu  = torch.nn.Linear(hidden_latent_dim, latent_dim)
-        self.fc_var = torch.nn.Linear(hidden_latent_dim, latent_dim)
+        self.fc_mu  = torch.nn.Linear(emb_dim, latent_dim)
+        self.fc_var = torch.nn.Linear(emb_dim, latent_dim)
 
     def reparameterize(self, mu, logvar):
         std = torch.exp(0.5 * logvar)
@@ -408,12 +403,19 @@ class PosteriorEncoder(torch.nn.Module):
         # print(x0.shape)
         # x0 = self.enc_x0(x0)
         # print(x0.shape)
+        # xx0 = self.enc_x0(x0)
+        # xx1 = self.enc_x1(x1)
+        # xxt = self.enc_xt(xt)
+        # tt = self.enc_t(t.unsqueeze(1))
+        # print(f"xx0 shape: {xx0.shape}, xx1 shape: {xx1.shape}, xxt shape: {xxt.shape}, tt shape: {tt.shape}")
         h = torch.cat([
             self.enc_x0(x0),
             self.enc_x1(x1),
             self.enc_xt(xt),
-            self.enc_t(t.unsqueeze(1)),
+            self.enc_t(t.unsqueeze(1)), #t.unsqueeze(1).shape: (B,1)
         ], dim=1)
+
+        # print(f"h.shape: {h.shape}")
 
         h = self.mlp(h)
         mu = self.fc_mu(h)
