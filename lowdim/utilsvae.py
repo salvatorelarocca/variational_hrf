@@ -34,6 +34,28 @@ class SinusoidalPosEmb(torch.nn.Module):
         emb = torch.cat((emb.sin(),emb.cos()),dim=-1)
         return emb
 
+class MySinusoidalPosEmb(torch.nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        assert dim % 2 == 0
+        self.dim = dim
+
+    def forward(self, t):
+        # t: (B,) oppure (B,1)
+        if t.dim() > 1:
+            t = t.squeeze(-1)
+
+        device = t.device
+        half_dim = self.dim // 2
+
+        freqs = torch.exp(
+            -math.log(10000) * torch.arange(half_dim, device=device) / (half_dim - 1)
+        )
+
+        args = t[:, None] * freqs[None, :]   # (B, half_dim)
+
+        emb = torch.cat([torch.sin(args), torch.cos(args)], dim=-1)
+        return emb  # (B, dim)
 
 
 def load_ckpt(rf_dir, dim, model, ckpt=None):
@@ -297,7 +319,9 @@ class VNet(torch.nn.Module): #questo non è un RF standard perché tratta la v
 class VNetD(torch.nn.Module):
     def __init__(self, data_dim=2, depth=2, hidden_num=128, latent_dim=8):
         super().__init__()
-        dim = self.dim = 64
+        dim = 64
+        self.dim = dim
+        self.depth = depth
 
         self.time_mlp = torch.nn.Sequential(
             SinusoidalPosEmb(dim),
@@ -318,15 +342,15 @@ class VNetD(torch.nn.Module):
         )
 
         self.z_encoder = torch.nn.Sequential(
-            torch.nn.Linear(latent_dim, 128),
+            torch.nn.Linear(latent_dim, hidden_num),
             torch.nn.GELU(),
-            torch.nn.Linear(128, 128),
+            torch.nn.Linear(hidden_num, hidden_num),
             torch.nn.GELU(),
-            torch.nn.Linear(128, 128),
+            torch.nn.Linear(hidden_num, hidden_num),
             torch.nn.GELU(),
         )
 
-        self.fc1 = torch.nn.Linear(3*depth*dim, 2*depth*hidden_num, bias=True)
+        self.fc1 = torch.nn.Linear(2*depth*dim + hidden_num, 2*depth*hidden_num, bias=True) #2(mlpdata + mlptime) + hidden_num (z_encoder)
         self.fc2 = torch.nn.Linear(2*depth*hidden_num, depth*hidden_num, bias=True)
         self.fc3 = torch.nn.Linear(depth*hidden_num, data_dim, bias=True)
         self.act = torch.nn.GELU()
@@ -340,11 +364,12 @@ class VNetD(torch.nn.Module):
         t = self.time_mlp(t)
         xt = self.data_mlp(xt)
         z = self.z_encoder(z)
-        
+        # print("After MLP:")
         # print(f"t shape: {t.shape}, xt shape: {xt.shape}, z shape: {z.shape}")
 
         x = torch.cat([xt, t, z], dim=1)   # N x 2*D*dim
         # print(f"concat shape: {x.shape}")
+
         x = self.fc1(x)
         x = self.act(x)
         x = self.fc2(x)
@@ -357,6 +382,7 @@ class SingleEncoder(nn.Module):
     def __init__(self, in_dim, emb_dim=64):
         super().__init__()
         self.proj = nn.Linear(in_dim, emb_dim)
+        self.pos = SinusoidalPosEmb(emb_dim)
         self.mlp = nn.Sequential(
             nn.Linear(emb_dim, emb_dim),
             nn.GELU(),
@@ -367,9 +393,11 @@ class SingleEncoder(nn.Module):
     def forward(self, x):
         if x.dim() == 1:
             x = x.unsqueeze(-1)
-        x = self.proj(x)   # (B,64)
-        return self.mlp(x) # (B,64)
-
+        x = self.proj(x)    # (B, d) -> (B, emb) 
+        x = self.pos(x)     # (B, emb) -> (B, emb, emb)
+        x = x.mean(dim=1)   # (B, emb, emb) -> (B, emb)     
+        x = self.mlp(x)     # (B, emb) -> (B, emb) 
+        return x
 
 class PosteriorEncoder(torch.nn.Module):
     def __init__(self, data_dim, latent_dim=8,
@@ -400,13 +428,20 @@ class PosteriorEncoder(torch.nn.Module):
         return eps * std + mu
 
     def forward(self, x0, x1, xt, t):
-        # print(x0.shape)
-        # x0 = self.enc_x0(x0)
-        # print(x0.shape)
+        '''
+        x0, x1, xt: (B, d)
+        t: (B,)
+        dopo l'encoding, otteniamo:
+        enc x0 x1 xt t: (B, emb_dim)
+        concatenati otteniamo h: (B, 4*emb_dim)
+        mlp passiamo a B, emb_dim
+        infine mu e log_var: (B, latent_dim)
+        '''
         # xx0 = self.enc_x0(x0)
         # xx1 = self.enc_x1(x1)
         # xxt = self.enc_xt(xt)
         # tt = self.enc_t(t.unsqueeze(1))
+        # print("Afeter encoding:")
         # print(f"xx0 shape: {xx0.shape}, xx1 shape: {xx1.shape}, xxt shape: {xxt.shape}, tt shape: {tt.shape}")
         h = torch.cat([
             self.enc_x0(x0),
@@ -415,11 +450,16 @@ class PosteriorEncoder(torch.nn.Module):
             self.enc_t(t.unsqueeze(1)), #t.unsqueeze(1).shape: (B,1)
         ], dim=1)
 
-        # print(f"h.shape: {h.shape}")
+        # print(f"Before MLP h.shape: {h.shape}")
 
-        h = self.mlp(h)
+        h = self.mlp(h) 
+        
+        # print(f"After MLP h.shape: {h.shape}")
         mu = self.fc_mu(h)
+        # print(f"Afeter mu shape: {mu.shape}")
         log_var = torch.clamp(self.fc_var(h), -10, 10)
+        # print(f"mu shape: {mu.shape}, log_var shape: {log_var.shape}")
         z = self.reparameterize(mu, log_var)
+        # print(f"z shape: {z.shape}")
         return z, mu, log_var
 

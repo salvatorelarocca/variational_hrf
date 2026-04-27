@@ -71,16 +71,20 @@ def train_hrf(data, depth, N_list, checkpoint, iterations, base_dir, seed, devic
     print(f"Posterior Encoder params number: {model_vae_size}")
     print("Posterior Encoder params: %.2f M" % (model_vae_size / 1000 / 1000))
 
+    if FLAGS.posterior_level == "first":
+        post_idx = 0
+    else:
+        post_idx = depth - 1
+
     A = torch.tril(torch.ones((depth, depth),device=device),diagonal=-1)
     with tqdm(initial=0,total=iterations) as pbar:
         for train_i in range(iterations):
             optimizer.zero_grad()
             indices = torch.randperm(len(data.pairs))[:checkpoint['batchsize']]
             batch = data.pairs[indices]
-            x0 = batch[:, 0].detach().clone()   # N x d
-            x1 = batch[:, 1].detach().clone()   # N x d
+            x0 = batch[:, 0].detach().clone()   # B x d
+            x1 = batch[:, 1].detach().clone()   # B x d
 
-            print(f"x0.shape: {x0.shape}, x1.shape: {x1.shape}")
 
             x0 = torch.cat([x0[:,None,:], torch.randn((x0.shape[0],depth-1)+x0.shape[1:],device=device)], dim=1)   # Batch x Depth x dimdata
 
@@ -88,13 +92,15 @@ def train_hrf(data, depth, N_list, checkpoint, iterations, base_dir, seed, devic
 
             xt = (1-t)*x0 + t*(x1[:,None,...] - torch.einsum('ij,bj...->bi...', A, x0))
             # pred = v_net(xt, t.squeeze(list(range(2,t.dim())))) nel repo hanno due volte pred questa dovrebbe essere quella sostituita dalla seguente
-            target = x1 - torch.sum(x0, dim=1) # N x d
+            target = x1 - torch.sum(x0, dim=1) # B x d
             
+            # print(f"x0.shape: {x0.shape}, x1.shape: {x1.shape}, xt.shape: {xt.shape}, t.shape: {t.shape}, target.shape: {target.shape}, t.squeeze(-1).shape: {t.squeeze(-1).shape}")
+
             z, mu, log_var = posterior(
-                x0=x0[:, 0, :],        # (B, d) 
+                x0=x0[:, post_idx, :],        # (B, d) 
                 x1=x1,                 # (B, d)  
-                xt=xt[:, 0, :],        # (B, d) 
-                t=t.squeeze(-1)[:, 0], # (B,) 
+                xt=xt[:, post_idx, :],        # (B, d) 
+                t=t.squeeze(-1)[:, post_idx], # (B,) 
             )
 
             pred = v_net(xt, t, z)
@@ -351,6 +357,7 @@ if __name__ == "__main__":
     flags.DEFINE_string("base_dir", "lowdim", "work dir")
     flags.DEFINE_enum("mode", None, ["train", "eval"], "running mode")
     flags.DEFINE_integer("eval_step", 50000, "checkpoint step to evaluate")
+    flags.DEFINE_enum("posterior_level", "first", ["first", "last"],"which depth level to use for posterior encoder")
     
 
     app.run(main)
