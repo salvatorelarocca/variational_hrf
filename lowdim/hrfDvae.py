@@ -76,6 +76,15 @@ def train_hrf(data, depth, N_list, checkpoint, iterations, base_dir, seed, devic
     else:
         post_idx = depth - 1
 
+    #intestazione file log cvs
+    log_file_train = os.path.join(base_dir, "log_train_mode.csv")
+
+    with open(log_file_train, mode='a', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        
+        if os.stat(log_file_train).st_size == 0:
+            writer.writerow(['train_step', 'data', 'SWD/WD', 'NFE', 'N_list', 'beta', 'latent_dim', 'model_size', 'model_vae_size', 'seed', 'posterior_level'])
+
     A = torch.tril(torch.ones((depth, depth),device=device),diagonal=-1)
     with tqdm(initial=0,total=iterations) as pbar:
         for train_i in range(iterations):
@@ -142,10 +151,8 @@ def train_hrf(data, depth, N_list, checkpoint, iterations, base_dir, seed, devic
                 else:
                     distance = ot.sliced_wasserstein_distance(xt, data.x1, seed=1)
                 print(f"{train_i+1} WD={distance} NFE={np.prod(N_list)} {N_list}")
-                
-                log_file = os.path.join(base_dir, "log_train_mode.csv")
 
-                with open(log_file, "a", newline="") as f:
+                with open(log_file_train, "a", newline="") as f:
                     writer = csv.writer(f)
 
                     writer.writerow([
@@ -154,11 +161,13 @@ def train_hrf(data, depth, N_list, checkpoint, iterations, base_dir, seed, devic
                         FLAGS.data_type,
                         f"{distance:.6f}",
                         np.prod(N_list),
-                        str(N_list),  # meglio json.dumps(N_list) se poi lo rileggi
+                        str(N_list),  
                         FLAGS.beta,
                         FLAGS.latent_dim,
                         model_size,
-                        model_vae_size
+                        model_vae_size,
+                        FLAGS.seed,
+                        FLAGS.posterior_level,
                     ])
 
                 print(
@@ -253,13 +262,15 @@ def main(argv):
 
     N_list   = [int(x) for x in FLAGS.N_list]
     
+    log_file_eval = os.path.join(base_dir, "log_eval_mode.csv")
+
+    with open(log_file_eval, mode='a', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        
+        if os.stat(log_file_eval).st_size == 0:
+            writer.writerow(['eval_step', 'data', 'SWD/WD', 'NFE', 'N_list', 'model_size', 'seed'])
+    
     if FLAGS.mode == "train":
-        # N_list = [100]
-        # N_list = [10,10]
-        # N_list = [2,5]
-        # N_list = [1,2,5,10]
-        # N_list = [1,2,5,5,10]
-        # N_list = [1,1,1,1,1,1,2,5,5,10]
         v_net, _ = train_hrf(data, len(N_list), N_list, checkpoint, iterations, hrf_dir, seed, device, progress=True)
 
     elif FLAGS.mode == "eval":
@@ -291,9 +302,8 @@ def main(argv):
                 distance = ot.sliced_wasserstein_distance(data.x1, xt, seed=1)
             plot_traj(traj, distance, traj_dir, file_name=f"traj_{ckpt_name}_{N_list}.png", title=f'Trajectory with {N_list} Sampling Steps')
 
-            log_file = os.path.join(hrf_dir, "log_eval_mode.csv")
 
-            with open(log_file, "a", newline="") as f:
+            with open(log_file_eval, "a", newline="") as f:
                 writer = csv.writer(f)
 
                 writer.writerow([
