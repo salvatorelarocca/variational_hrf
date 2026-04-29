@@ -379,24 +379,25 @@ class VNetD(torch.nn.Module):
         return x
     
 class SingleEncoder(nn.Module):
-    def __init__(self, in_dim, emb_dim=64):
+    def __init__(self, in_dim, emb_dim=32):
         super().__init__()
-        self.proj = nn.Linear(in_dim, emb_dim)
         self.pos = SinusoidalPosEmb(emb_dim)
         self.mlp = nn.Sequential(
-            nn.Linear(emb_dim, emb_dim),
+            nn.Linear(emb_dim*in_dim, emb_dim*in_dim),
             nn.GELU(),
-            nn.Linear(emb_dim, emb_dim),
+            nn.Linear(emb_dim*in_dim, emb_dim*in_dim),
             nn.GELU(),
         )
 
     def forward(self, x):
         if x.dim() == 1:
             x = x.unsqueeze(-1)
-        x = self.proj(x)    # (B, d) -> (B, emb) 
-        x = self.pos(x)     # (B, emb) -> (B, emb, emb)
-        x = x.mean(dim=1)   # (B, emb, emb) -> (B, emb)     
-        x = self.mlp(x)     # (B, emb) -> (B, emb) 
+        # print(f"Input to SingleEncoder: {x.shape}")
+        x = self.pos(x)    
+        # print(f"after pos: {x.shape}")
+        x = x.flatten(start_dim=1)
+        x = self.mlp(x)
+        # print(f"after mlp: {x.shape}")
         return x
 
 class PosteriorEncoder(torch.nn.Module):
@@ -409,9 +410,9 @@ class PosteriorEncoder(torch.nn.Module):
         self.enc_xt = SingleEncoder(data_dim, emb_dim)
         self.enc_t  = SingleEncoder(1, emb_dim)
         
-
+        in_mlp_dim = emb_dim * data_dim * 3 + emb_dim
         self.mlp = torch.nn.Sequential(
-            torch.nn.Linear(emb_dim * 4, emb_dim),
+            torch.nn.Linear(in_mlp_dim, emb_dim),
             torch.nn.GELU(),
             torch.nn.Linear(emb_dim, emb_dim),
             torch.nn.GELU(),
@@ -419,7 +420,7 @@ class PosteriorEncoder(torch.nn.Module):
             torch.nn.GELU(),
         )
 
-        self.fc_mu  = torch.nn.Linear(emb_dim, latent_dim)
+        self.fc_mu  = torch.nn.Linear(emb_dim, latent_dim) # strati finali per ottenere mu e log_var fanno scendere alla dimensione latent
         self.fc_var = torch.nn.Linear(emb_dim, latent_dim)
 
     def reparameterize(self, mu, logvar):

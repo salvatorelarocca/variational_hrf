@@ -156,7 +156,6 @@ def train_hrf(data, depth, N_list, checkpoint, iterations, base_dir, seed, devic
                     writer = csv.writer(f)
 
                     writer.writerow([
-                        FLAGS.mode,
                         train_i + 1,
                         FLAGS.data_type,
                         f"{distance:.6f}",
@@ -307,7 +306,6 @@ def main(argv):
                 writer = csv.writer(f)
 
                 writer.writerow([
-                    FLAGS.mode,
                     FLAGS.data_type,
                     f"{distance:.6f}",
                     np.prod(N_list),
