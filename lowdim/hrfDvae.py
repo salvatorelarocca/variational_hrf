@@ -10,8 +10,8 @@ from absl import app, flags
 from scipy.stats import wasserstein_distance
 from tqdm import tqdm
 
-from utilsvae import load_ckpt, plot_traj
-from utilsvae import LowDimData, VNetD, PosteriorEncoder
+from utilsvae1 import load_ckpt, plot_traj
+from utilsvae1 import LowDimData, VNetD, PosteriorEncoder
 
 @torch.no_grad()
 def sample_hierarchical(model, x_t, t, cur_depth, max_depth, N_list, return_traj=False, z=None):
