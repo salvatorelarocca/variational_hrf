@@ -378,12 +378,33 @@ class VNetD(torch.nn.Module):
 
         return x
     
+class SingleEncoder_t(nn.Module):
+    def __init__(self, in_dim, emb_dim=64):
+        super().__init__()
+        self.pos_emb = MySinusoidalPosEmb(emb_dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(emb_dim, emb_dim),
+            nn.GELU(),
+            nn.Linear(emb_dim, emb_dim),
+            nn.GELU(),
+        )
+
+    def forward(self, x):
+        if x.dim() == 1:
+            print(f"Input t shape before unsqueeze: {x.shape}")
+            x = x.unsqueeze(-1)
+            print(f"Input t shape after unsqueeze: {x.shape}")
+            
+        x = self.pos_emb(x)
+        x = self.mlp(x)
+        print(f"after mlp: {x.shape}")
+        return x
+
 class SingleEncoder(nn.Module):
     def __init__(self, in_dim, emb_dim=64):
         super().__init__()
+        self.proj = nn.Linear(in_dim, emb_dim)
         self.mlp = nn.Sequential(
-            nn.Linear(in_dim, emb_dim),
-            nn.GELU(),
             nn.Linear(emb_dim, emb_dim),
             nn.GELU(),
             nn.Linear(emb_dim, emb_dim),
@@ -393,6 +414,7 @@ class SingleEncoder(nn.Module):
     def forward(self, x):
         if x.dim() == 1:
             x = x.unsqueeze(-1)
+        x = self.proj(x)
         x = self.mlp(x)
         print(f"after mlp: {x.shape}")
         return x
@@ -405,7 +427,7 @@ class PosteriorEncoder(torch.nn.Module):
         self.enc_x0 = SingleEncoder(data_dim, emb_dim)
         self.enc_x1 = SingleEncoder(data_dim, emb_dim)
         self.enc_xt = SingleEncoder(data_dim, emb_dim)
-        self.enc_t  = SingleEncoder(1, emb_dim)
+        self.enc_t  = SingleEncoder_t(1, emb_dim)
         
         in_mlp_dim = emb_dim * 4
         self.mlp = torch.nn.Sequential(
@@ -435,6 +457,7 @@ class PosteriorEncoder(torch.nn.Module):
         mlp passiamo a B, emb_dim
         infine mu e log_var: (B, latent_dim)
         '''
+        print(x0.shape, x1.shape, xt.shape, t.shape)
         # xx0 = self.enc_x0(x0)
         # xx1 = self.enc_x1(x1)
         # xxt = self.enc_xt(xt)
