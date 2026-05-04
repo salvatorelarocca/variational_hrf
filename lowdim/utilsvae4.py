@@ -380,7 +380,7 @@ class VNetD(torch.nn.Module):
 
 
 class SingleEncoder(nn.Module):
-    def __init__(self, emb_dim=64):
+    def __init__(self, in_dim,  emb_dim=64):
         super().__init__()
         self.pos = SinusoidalPosEmb(emb_dim)
         self.mlp = nn.Sequential(
@@ -390,7 +390,7 @@ class SingleEncoder(nn.Module):
         )
 
     def forward(self, x):   # x: (B, d)
-        x = self.pos(x)     # (B, d, emb)
+        x = self.pos(x)     # (B, dim) -> (B, dim, emb)
         x = self.mlp(x)     # (B, d, emb)
         x = x.mean(dim=1)   # (B, emb)
         return x
@@ -400,10 +400,10 @@ class PosteriorEncoder(torch.nn.Module):
                  emb_dim=64):
         super().__init__()
 
-        self.enc_x0 = SingleEncoder(emb_dim)
-        self.enc_x1 = SingleEncoder(emb_dim)
-        self.enc_xt = SingleEncoder(emb_dim)
-        self.enc_t  = SingleEncoder(emb_dim)
+        self.enc_x0 = SingleEncoder(data_dim, emb_dim)
+        self.enc_x1 = SingleEncoder(data_dim, emb_dim)
+        self.enc_xt = SingleEncoder(data_dim, emb_dim)
+        self.enc_t  = SingleEncoder(1, emb_dim)
         
         in_mlp_dim = emb_dim * 4
         self.mlp = torch.nn.Sequential(

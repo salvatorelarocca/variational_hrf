@@ -77,7 +77,7 @@ def train_hrf(data, depth, N_list, checkpoint, iterations, base_dir, seed, devic
         post_idx = depth - 1
 
     #intestazione file log cvs
-    log_file_train = os.path.join(base_dir, "log_train_mode.csv")
+    log_file_train = os.path.join(base_dir, "../../../log_train_mode_vae.csv")
 
     with open(log_file_train, mode='a', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
@@ -261,7 +261,7 @@ def main(argv):
 
     N_list   = [int(x) for x in FLAGS.N_list]
     
-    log_file_eval = os.path.join(base_dir, "log_eval_mode.csv")
+    log_file_eval = os.path.join(base_dir, "../../log_eval_mode_vae.csv")
 
     with open(log_file_eval, mode='a', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)

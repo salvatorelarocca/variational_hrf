@@ -391,12 +391,14 @@ class SingleEncoder(nn.Module):
         )
 
     def forward(self, x):
-        if x.dim() == 1:
-            x = x.unsqueeze(-1)
+        print(x.dim())
+        if x.dim() == 1: #se è un vettore (B,), lo trasformo in (B,1) per poterlo passare alla linear
+            x = x.unsqueeze(1)
+            # print(f"x.shape after unsqueeze: {x.shape}")
 
         x = self.proj(x)    # (B, d) -> (B, emb) 
+        x = x.mean(dim=1)   
         x = self.pos(x)     # (B, emb) -> (B, emb, emb)
-        x = x.mean(dim=1)   # (B, emb, emb) -> (B, emb)     
         x = self.mlp(x)  
         return x
 
