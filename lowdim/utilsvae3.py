@@ -347,7 +347,6 @@ class VNetD(torch.nn.Module):
             torch.nn.Linear(hidden_num, hidden_num),
             torch.nn.GELU(),
             torch.nn.Linear(hidden_num, hidden_num),
-            torch.nn.GELU(),
         )
 
         self.fc1 = torch.nn.Linear(2*depth*dim + hidden_num, 2*depth*hidden_num, bias=True) #2(mlpdata + mlptime) + hidden_num (z_encoder)
@@ -381,26 +380,19 @@ class VNetD(torch.nn.Module):
 class SingleEncoder(nn.Module):
     def __init__(self, in_dim, emb_dim=64):
         super().__init__()
-        self.proj = nn.Linear(in_dim, emb_dim)
-        self.pos = SinusoidalPosEmb(emb_dim)
-        self.mlp = nn.Sequential(
-            nn.Linear(emb_dim, emb_dim),
-            nn.GELU(),
-            nn.Linear(emb_dim, emb_dim),
-            nn.GELU(),
+        self.data_mlp = torch.nn.Sequential(
+            SinusoidalPosEmb(emb_dim),
+            torch.nn.Linear(emb_dim, emb_dim),
+            torch.nn.Flatten(),
+            torch.nn.GELU(),
+            torch.nn.Linear(emb_dim*in_dim, emb_dim),
         )
 
     def forward(self, x):
-        print(x.dim())
         if x.dim() == 1: #se è un vettore (B,), lo trasformo in (B,1) per poterlo passare alla linear
             x = x.unsqueeze(1)
-            # print(f"x.shape after unsqueeze: {x.shape}")
-
-        x = self.proj(x)    # (B, d) -> (B, emb) 
-        x = x.mean(dim=1)   
-        x = self.pos(x)     # (B, emb) -> (B, emb, emb)
-        x = self.mlp(x)  
-        return x
+        
+        return self.data_mlp(x)
 
 class PosteriorEncoder(torch.nn.Module):
     def __init__(self, data_dim, latent_dim=8,
@@ -419,7 +411,6 @@ class PosteriorEncoder(torch.nn.Module):
             torch.nn.Linear(emb_dim, emb_dim),
             torch.nn.GELU(),
             torch.nn.Linear(emb_dim, emb_dim),
-            torch.nn.GELU(),
         )
 
         self.fc_mu  = torch.nn.Linear(emb_dim, latent_dim) # strati finali per ottenere mu e log_var fanno scendere alla dimensione latent

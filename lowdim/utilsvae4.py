@@ -341,13 +341,13 @@ class VNetD(torch.nn.Module):
             # torch.nn.LayerNorm(dim),
         )
 
+
         self.z_encoder = torch.nn.Sequential(
             torch.nn.Linear(latent_dim, hidden_num),
             torch.nn.GELU(),
             torch.nn.Linear(hidden_num, hidden_num),
             torch.nn.GELU(),
             torch.nn.Linear(hidden_num, hidden_num),
-            torch.nn.GELU(),
         )
 
         self.fc1 = torch.nn.Linear(2*depth*dim + hidden_num, 2*depth*hidden_num, bias=True) #2(mlpdata + mlptime) + hidden_num (z_encoder)
@@ -365,7 +365,7 @@ class VNetD(torch.nn.Module):
         xt = self.data_mlp(xt)
         z = self.z_encoder(z)
         # print("After MLP:")
-        # print(f"t shape: {t.shape}, xt shape: {xt.shape}, z shape: {z.shape}")
+        print(f"t shape: {t.shape}, xt shape: {xt.shape}, z shape: {z.shape}")
 
         x = torch.cat([xt, t, z], dim=1)   # N x 2*D*dim
         # print(f"concat shape: {x.shape}")
@@ -412,7 +412,6 @@ class PosteriorEncoder(torch.nn.Module):
             torch.nn.Linear(emb_dim, emb_dim),
             torch.nn.GELU(),
             torch.nn.Linear(emb_dim, emb_dim),
-            torch.nn.GELU(),
         )
 
         self.fc_mu  = torch.nn.Linear(emb_dim, latent_dim) # strati finali per ottenere mu e log_var fanno scendere alla dimensione latent
