@@ -306,6 +306,7 @@ def main(argv):
                 writer = csv.writer(f)
 
                 writer.writerow([
+                    FLAGS.eval_step,
                     FLAGS.data_type,
                     f"{distance:.6f}",
                     np.prod(N_list),
@@ -313,6 +314,7 @@ def main(argv):
                     FLAGS.beta,
                     FLAGS.latent_dim,
                     model_size,
+                    FLAGS.seed,
                 ])
 
                 print(
