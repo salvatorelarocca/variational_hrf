@@ -267,7 +267,7 @@ def main(argv):
         writer = csv.writer(f)
         
         if os.stat(log_file_eval).st_size == 0:
-            writer.writerow(['eval_step', 'data', 'SWD/WD', 'NFE', 'N_list', 'model_size', 'seed'])
+            writer.writerow(['eval_step', 'data', 'SWD/WD', 'NFE', 'N_list', 'beta', 'latent_dim', 'model_size', 'seed'])
     
     if FLAGS.mode == "train":
         v_net, _ = train_hrf(data, len(N_list), N_list, checkpoint, iterations, hrf_dir, seed, device, progress=True)
